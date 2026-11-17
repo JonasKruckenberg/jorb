@@ -233,11 +233,12 @@ fn power_off() -> ! {
         error!(error = error.to_string(), "powering off failed");
     }
 
-    // The reboot syscall does not return when it works. If it did fail, there
-    // is nothing further to try: stop asking the kernel to do things.
-    loop {
-        std::thread::park();
-    }
+    // The syscall does not return when it works, so reaching here means it
+    // failed. PID 1 exiting panics the kernel, which stops the VM and so the
+    // unit, which is the same thing the host was going to see. Looping here
+    // instead would be a second unbounded loop, and the reap loop is the only
+    // one jorb allows itself.
+    std::process::exit(1)
 }
 
 #[cfg(test)]

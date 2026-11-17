@@ -27,6 +27,29 @@ the network policy that host generates.
 What is left is everything that needs root on this machine, plus the owner's
 own steps. Nothing is blocked on a decision.
 
+## What to run next, as root
+
+```sh
+# The gates that need taps, systemd-run and cgroups, in this order.
+sudo -E tests/host/g4-boot.sh
+sudo -E tests/host/g5-free-page-reporting.sh
+sudo -E tests/host/t5-jorb-init.sh      # T5 in a real guest
+
+# The behaviour matrix, all seven sections, or one at a time.
+sudo -E tests/host/matrix.sh
+sudo -E tests/host/matrix.sh 4          # just the network policy, say
+
+# Once /var/lib/jorb is an XFS partition:
+sudo -E tests/host/g3-reflink.sh
+sudo nix run .#jorb-prepare-image       # the real base image, needs the network
+
+# Once the module and T10 are on the host:
+sudo -E tests/host/g7-observability.sh
+```
+
+The gates read `JORB_*` from the environment, so `sudo -E` rather than plain
+`sudo`, and they build what they need from the flake themselves.
+
 ## Gate results
 
 | Gate | Result |
@@ -347,3 +370,20 @@ Notes:
   never existed was expected to leave a disk behind.
 - Awaiting a run as root. It is the only thing that can turn T8's "behaviour
   verified in T11" into a result.
+
+## Review
+
+AGENTS.md asks for a reviewer with fresh context at the end of a milestone.
+This session was told not to use subagents, so the review was done by
+rereading the diff against AGENTS.md's Model, Failure model, Fixed
+interfaces, Security, Names and Bounds sections. It found two things, both
+fixed and both recorded above: the provider's unit name colliding with the
+orbs' pattern in `recover`, and a second unbounded loop in `jorb-init`'s
+`power_off` fallback, which is now `exit(1)` and so leaves the reap loop as
+the only one.
+
+Worth a second pair of eyes anyway: the three crates are over the size
+guidance (`jorb-vmm` about 300 hand-written lines against 150, `jorb` about
+470 against 300, `jorb-init` about 230 against 150). Most of the excess is
+the `//!` and `///` prose the conventions ask for plus the error enum, but it
+is the kind of thing the guidance exists to flag.
