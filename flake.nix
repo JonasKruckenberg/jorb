@@ -105,6 +105,8 @@
               pkgs.coreutils
 
               # scripts and data wrangling in tests/host
+              pkgs.curl
+              pkgs.file
               pkgs.jq
               pkgs.shellcheck
               pkgs.ripgrep
@@ -125,6 +127,7 @@
 
       packages = forAllSystems (pkgs: {
         guest-kernel = pkgs.callPackage ./nix/kernel.nix { };
+        test-image = pkgs.callPackage ./nix/test-image.nix { };
       });
 
       # `nix flake check` runs what the Commands section of AGENTS.md lists:

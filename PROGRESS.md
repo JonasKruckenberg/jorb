@@ -7,8 +7,8 @@
 | T0 repository skeleton | done |
 | T1 guest kernel | building, config check written |
 | T2 generated client spike | done, A9 and A10 verified |
-| T3 host gates | not started |
-| T4 jorb-vmm API | not started |
+| T3 host gates | G1, G2, G8 pass; G3 needs the XFS partition; G4, G5, G7 await a root run |
+| T4 jorb-vmm API | done but for the host example |
 | T5 jorb-init | not started |
 | T6 base image script | not started |
 | T7 jorb types | not started |
@@ -101,3 +101,68 @@ guessing if the spec stops looking the way they expect.
   `serde_yaml` 0.9 because the spec is YAML. Both versions are the ones
   progenitor already uses. No `syn` or `prettyplease`: the generated tokens go
   to `$OUT_DIR` unformatted.
+
+### T3
+
+Eight gate scripts in `tests/host/`, each printing one PASS or FAIL line plus
+evidence, sharing `lib.sh`. `lib.sh` also holds the VM shape as Cloud
+Hypervisor's API wants it, so G4 and G5 boot the same shape from the same
+definition, by hand with curl, independently of jorb's own code. The busybox
+ext4 image G4 and G5 boot is `nix build .#test-image`, and its init
+(`nix/test-init.sh`) prints one `JORB-GATE` marker per thing a gate observes.
+
+Run on this host (aarch64, 16K pages, /dev/kvm present, no root in this
+session):
+
+| Gate | Result |
+|---|---|
+| G1 | PASS. 15673 MiB total, 12309 MiB available, so `memoryHigh = 11797M` |
+| G2 | PASS. `hpage_pmd_size` is 33554432 (32 MiB), so A6 holds |
+| G3 | FAIL. `/var/lib/jorb` does not exist yet; the XFS partition is the owner's step |
+| G4 | awaiting a run as root (taps, systemd-run, cgroups) |
+| G5 | awaiting a run as root |
+| G6 | see below |
+| G7 | awaiting a run as root, and it needs T10's Alloy config installed first |
+| G8 | PASS. A12 holds: `nixpkgs#amp-cli` really has `orb provider` |
+
+Notes:
+
+- G1's number was read with no observability stack running and no zram
+  configured, so it is an upper bound rather than the steady state the plan
+  asks for. Worth re-reading once T9 and T10 are on the host. The host also has
+  15.7 GiB of memory, not the 8 GiB `AGENTS.md` describes.
+- G8: `nixpkgs#amp` is a text editor that shares the name; the gate now builds
+  each candidate and runs `amp orb provider --help` rather than trusting the
+  attribute name. `nixpkgs#amp-cli` is unfree, so whatever installs it has to
+  allow that.
+- The Amp orb images, from https://ampcode.com/docs/orbs/self-hosted:
+  `us-central1-docker.pkg.dev/amp-prod-0/amp-orb/amp-orb-arm64:latest` for
+  aarch64 and `.../amp-orb:latest` for x86_64. The arm64 digest at the time of
+  writing is
+  `sha256:c231df95186127aea0c68fd3642323629a0e65157b275e98d5d16e89ed1e0805`.
+- The same page lists the hosts an orb needs to reach: `ampcode.com:443`,
+  `static.ampcode.com:443`, `tunnel.ampcode.com:443`, git hosts on 443 and
+  `storage.googleapis.com:443`. T9's network policy has to let DNS out too,
+  because the cmdline points the guest at 1.1.1.1 and 9.9.9.9.
+
+### T4
+
+- `VmBuilder::new` takes the kernel, the cmdline, the vCPU count and the memory
+  size, because a VM without the last two is not a shape anyone meant to ask
+  for. Their types differ (`NonZeroU8` and `NonZeroU32`) so the two numbers
+  cannot be swapped by mistake.
+- Serial on stdout and the virtio console off are not methods: the fixed
+  interface has them always, and a builder that could leave serial off would be
+  a builder that can produce a guest whose output never reaches the journal.
+- `VmState` is this crate's own enum, with one variant Cloud Hypervisor does
+  not have: `Absent`, for a VMM that answers but has no VM. That is what a job
+  killed between `systemd-run` and `vm.create` leaves behind, and making it a
+  state rather than an error keeps `state()` total.
+- The golden file is `jorb-vmm/tests/vm-shape.json`, compared against what the
+  builder serialises for the v1 sizing. It includes the fields Cloud
+  Hypervisor's types default (`queue_size`, `hotplug_method`, `vhost_mode` and
+  so on), because those are part of what jorb actually sends.
+- `cargo test -p jorb-vmm` passes, clippy is clean, `cargo fmt --check` is
+  clean. The `[host]` half of T4's acceptance is `examples/boot.rs`, which
+  boots the G4 image through the builder; it is awaiting the same root run as
+  G4.

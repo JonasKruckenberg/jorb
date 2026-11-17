@@ -1,14 +1,16 @@
-//! Prints the version of the Cloud Hypervisor listening on an API socket.
+//! Says what the Cloud Hypervisor on an API socket has, if anything.
 //!
 //! Usage: `cargo run -p jorb-vmm --example ping -- /run/jorb/<id>.sock`
 #![allow(
     clippy::print_stdout,
-    reason = "the printed version is what this example is for"
+    reason = "what this example prints is what it is for"
 )]
 
 use std::env;
 use std::error::Error;
 use std::path::PathBuf;
+
+use jorb_vmm::Vm;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -17,7 +19,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .map(PathBuf::from)
         .ok_or("usage: ping <api socket>")?;
 
-    println!("{}", jorb_vmm::vmm_version(&socket).await?);
+    match Vm::attach(&socket).await? {
+        Some(vm) => println!("{:?}", vm.state().await?),
+        None => println!("nothing is listening on {}", socket.display()),
+    }
 
     Ok(())
 }
