@@ -1,0 +1,7 @@
+# Tests may unwrap, expect, panic and print: a failing test should be loud, and
+# its failure is the message. Production code carries errors instead.
+allow-dbg-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-print-in-tests = true
+allow-unwrap-in-tests = true
