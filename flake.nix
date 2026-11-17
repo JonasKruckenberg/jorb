@@ -81,6 +81,23 @@
       # shell installs, so the generated client cannot drift from the binary.
       chOpenapiSpec = pkgs: "${pkgs.cloud-hypervisor.src}/vmm/src/api/openapi/cloud-hypervisor.yaml";
 
+      # The job runner itself: one invocation, one job.
+      jorbFor =
+        pkgs:
+        let
+          inherit (workspaceFor pkgs) craneLib commonArgs cargoArtifacts;
+        in
+        craneLib.buildPackage (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+            pname = "jorb";
+            cargoExtraArgs = "--package jorb";
+            doCheck = false;
+            meta.platforms = defaultSystems;
+          }
+        );
+
       # jorb-init is PID 1 in a guest with no loader and no libraries, so it is
       # built against musl and statically linked. The guest runs the host's
       # architecture, so this is not a cross-build in any real sense.
@@ -157,11 +174,32 @@
       );
 
       packages = forAllSystems (pkgs: {
+        default = jorbFor pkgs;
+        jorb = jorbFor pkgs;
         guest-kernel = pkgs.callPackage ./nix/kernel.nix { };
         test-image = pkgs.callPackage ./nix/test-image.nix { jorb-init = jorbInitFor pkgs; };
         jorb-init = jorbInitFor pkgs;
         jorb-prepare-image = pkgs.callPackage ./nix/image.nix { jorb-init = jorbInitFor pkgs; };
       });
+
+      # The host side, with this flake's own builds as the defaults the module
+      # would otherwise have no way to name.
+      nixosModules.default =
+        { pkgs, ... }:
+        let
+          ours = self.packages.${pkgs.stdenv.hostPlatform.system};
+        in
+        {
+          imports = [ ./nix/module.nix ];
+
+          services.jorb = {
+            package = lib.mkDefault ours.jorb;
+            prepareImagePackage = lib.mkDefault ours.jorb-prepare-image;
+            kernel = lib.mkDefault "${ours.guest-kernel}/kernel";
+          };
+        };
+
+      nixosModules.jorb = self.nixosModules.default;
 
       # `nix flake check` runs what the Commands section of AGENTS.md lists:
       # formatting, clippy and the test suite, plus Nix evaluation.
@@ -182,6 +220,72 @@
           );
 
           fmt = craneLib.cargoFmt { inherit (commonArgs) pname version src; };
+
+          # Evaluates a host that enables the module, then checks the network
+          # policy it generated. `nft -c` needs a netlink socket, which a
+          # private network namespace provides without any privileges.
+          module =
+            let
+              host = nixpkgs.lib.nixosSystem {
+                inherit (pkgs.stdenv.hostPlatform) system;
+                modules = [
+                  self.nixosModules.default
+                  {
+                    services.jorb = {
+                      enable = true;
+                      tokenFile = "/var/lib/secrets/jorb-provider.env";
+                      memoryHigh = "11797M";
+                      observability.enable = true;
+                    };
+
+                    # Enough of a host to evaluate, not to boot.
+                    boot.loader.grub.enable = false;
+                    fileSystems."/" = {
+                      device = "/dev/null";
+                      fsType = "ext4";
+                    };
+                    nixpkgs.config.allowUnfreePredicate = package: lib.getName package == "amp-cli";
+                    system.stateVersion = lib.versions.majorMinor lib.version;
+                  }
+                ];
+              };
+
+              # The parts of the configuration this check is about, forced by
+              # being written down.
+              evaluated = pkgs.writeTextDir "evidence" ''
+                ${host.config.systemd.units."jorb-provider.service".text}
+                ${host.config.systemd.units."jorb.slice".text}
+                ${host.config.environment.etc.sudoers.source}
+                ${lib.concatStringsSep "\n" host.config.systemd.tmpfiles.rules}
+                net.ipv4.ip_forward = ${toString host.config.boot.kernel.sysctl."net.ipv4.ip_forward"}
+                zramSwap.enable = ${lib.boolToString host.config.zramSwap.enable}
+              '';
+            in
+            pkgs.runCommand "jorb-module"
+              {
+                nativeBuildInputs = [
+                  pkgs.jq
+                  pkgs.nftables
+                  pkgs.util-linux
+                ];
+              }
+              ''
+                cp ${pkgs.writeText "jorb.nft" host.config.networking.nftables.ruleset} ruleset.nft
+                unshare --map-root-user --net nft --check --file ruleset.nft
+
+                # The dashboard has to be JSON Grafana will take, and every
+                # panel has to name a query.
+                jq -e '.panels | length > 0' ${./nix/jorb-dashboard.json} >/dev/null
+                jq -e '
+                  [.panels[] | select(.type != "row")]
+                  | all(.targets | length > 0 and all(.expr | length > 0))
+                ' ${./nix/jorb-dashboard.json} >/dev/null
+
+                mkdir -p "$out"
+                cat ${evaluated}/evidence > "$out/evidence"
+                cat ${host.config.environment.etc.sudoers.source} >> "$out/evidence"
+                cat ${host.config.environment.etc."alloy/jorb.alloy".source} > "$out/jorb.alloy"
+              '';
         }
       );
     };

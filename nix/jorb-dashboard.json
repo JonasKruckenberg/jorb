@@ -1,0 +1,261 @@
+{
+  "title": "jorb",
+  "uid": "jorb-orbs",
+  "editable": true,
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "tags": ["jorb", "orbs"],
+  "templating": {
+    "list": [
+      {
+        "name": "metrics",
+        "label": "Metrics",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "logs",
+        "label": "Logs",
+        "type": "datasource",
+        "query": "loki",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "provider_unit",
+        "label": "Provider unit",
+        "type": "textbox",
+        "query": "jorb-provider.service",
+        "current": { "text": "jorb-provider.service", "value": "jorb-provider.service" },
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Per orb",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU per orb",
+      "description": "vCPU seconds burned per second, so 4 means an orb is using all four of its vCPUs.",
+      "datasource": { "type": "prometheus", "uid": "${metrics}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "unit": "none", "min": 0, "custom": { "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${metrics}" },
+          "expr": "sum by (orb) (rate(container_cpu_usage_seconds_total{orb!=\"\"}[5m]))",
+          "legendFormat": "{{orb}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory per orb",
+      "description": "Working set as the slice's cgroup sees it. It should fall after a build finishes: that is free page reporting giving the host its memory back (G5).",
+      "datasource": { "type": "prometheus", "uid": "${metrics}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "min": 0, "custom": { "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${metrics}" },
+          "expr": "sum by (orb) (container_memory_working_set_bytes{orb!=\"\"})",
+          "legendFormat": "{{orb}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Disk IO per orb",
+      "description": "Bytes read and written through the orb's disk, which is a reflink clone of the base image.",
+      "datasource": { "type": "prometheus", "uid": "${metrics}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "unit": "Bps", "min": 0, "custom": { "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${metrics}" },
+          "expr": "sum by (orb) (rate(container_fs_reads_bytes_total{orb!=\"\"}[5m]))",
+          "legendFormat": "{{orb}} read"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${metrics}" },
+          "expr": "sum by (orb) (rate(container_fs_writes_bytes_total{orb!=\"\"}[5m]))",
+          "legendFormat": "{{orb}} write"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "The host",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tap bytes per slot",
+      "description": "Traffic on each slot's tap. A slot with a tap is a slot in use, so a flat line at zero with a live series means an idle orb rather than a free slot.",
+      "datasource": { "type": "prometheus", "uid": "${metrics}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 10 },
+      "fieldConfig": {
+        "defaults": { "unit": "Bps", "min": 0, "custom": { "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${metrics}" },
+          "expr": "rate(node_network_receive_bytes_total{device=~\"jorb[0-9]+\"}[5m])",
+          "legendFormat": "{{device}} from the orb"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${metrics}" },
+          "expr": "rate(node_network_transmit_bytes_total{device=~\"jorb[0-9]+\"}[5m])",
+          "legendFormat": "{{device}} to the orb"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "zram, stored against compressed",
+      "description": "What the orbs' reclaimed pages would have cost against what they do cost. The gap is the headroom MemoryHigh buys.",
+      "datasource": { "type": "prometheus", "uid": "${metrics}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 10 },
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "min": 0, "custom": { "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${metrics}" },
+          "expr": "sum(node_zram_original_data_size_bytes)",
+          "legendFormat": "original"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${metrics}" },
+          "expr": "sum(node_zram_compressed_data_size_bytes)",
+          "legendFormat": "compressed"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "No free slot, last 24h",
+      "description": "Jobs refused because every slot was taken. This is the host's capacity error, and the only counter jorb keeps about it.",
+      "datasource": { "type": "loki", "uid": "${logs}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 10 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${logs}" },
+          "expr": "sum(count_over_time({unit=\"$provider_unit\"} |= `no free slot` [24h]))",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Jobs",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Job duration by operation",
+      "description": "From jorb's own closing event. Amp gives up at five minutes; jorb's own deadline is four.",
+      "datasource": { "type": "loki", "uid": "${logs}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "min": 0, "custom": { "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${logs}" },
+          "expr": "quantile_over_time(0.95, {unit=\"$provider_unit\"} | json | elapsed_ms != \"\" | unwrap elapsed_ms [5m]) by (op)",
+          "legendFormat": "{{op}} p95"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "loki", "uid": "${logs}" },
+          "expr": "max_over_time({unit=\"$provider_unit\"} | json | elapsed_ms != \"\" | unwrap elapsed_ms [5m]) by (op)",
+          "legendFormat": "{{op}} max"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Job outcomes",
+      "description": "Every job reports one outcome. A failure is a job whose postcondition was not observed, which is also a non-zero exit to Amp.",
+      "datasource": { "type": "loki", "uid": "${logs}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
+      "fieldConfig": {
+        "defaults": { "unit": "none", "min": 0, "custom": { "fillOpacity": 30, "stacking": { "mode": "normal" } } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "failed" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${logs}" },
+          "expr": "sum by (outcome) (count_over_time({unit=\"$provider_unit\"} | json | outcome != \"\" [5m]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "type": "logs",
+      "title": "Failed jobs",
+      "description": "The error each failed job reported, with the orb it was for.",
+      "datasource": { "type": "loki", "uid": "${logs}" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 27 },
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${logs}" },
+          "expr": "{unit=\"$provider_unit\"} | json | outcome = \"failed\"",
+          "queryType": "range"
+        }
+      ]
+    }
+  ]
+}

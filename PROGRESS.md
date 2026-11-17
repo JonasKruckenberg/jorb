@@ -13,8 +13,8 @@
 | T6 base image script | done but for the host run |
 | T7 jorb types | done |
 | T8 jorb primitives | done, behaviour awaits T11 |
-| T9 NixOS module | not started |
-| T10 observability | not started |
+| T9 NixOS module | done but for the [human] wiring |
+| T10 observability | written, panels await the T11 run |
 | T11 behaviour matrix | not started |
 | T12 end to end | not started |
 
@@ -218,3 +218,47 @@ Notes:
   | `spawn` with a token, no base image | exit 1, "opening the base image at ...; has jorb-prepare-image run?" |
 
   The token appeared in zero log lines across those runs.
+
+### T9
+
+- `nix/module.nix` holds the whole host side; `nixosModules.default` in the
+  flake fills in this flake's own builds as the defaults for `package`,
+  `prepareImagePackage` and `kernel`.
+- The privilege boundary, as generated and checked:
+
+  ```
+  jorb ALL=(ALL:ALL) NOPASSWD:SETENV: /nix/store/.../jorb-root/bin/jorb-root
+  Defaults:jorb env_keep += "ORB_OPERATION ORB_ID ORB_TOKEN AMP_URL"
+  ```
+
+  One program, four variables. `jorb-root` then sets every `JORB_*` itself, so
+  nothing the provider says can describe the host.
+- The provider unit is pinned to `system.slice`, which is the other half of
+  the recover near-miss above: `jorb-provider.service` matches the pattern
+  recover looks for, and the slice is what tells them apart.
+- `checks.module` evaluates a host with the module enabled and then checks the
+  generated nftables ruleset with `nft --check`. That needs a netlink socket,
+  which root does not have to provide: `unshare --map-root-user --net` gives
+  the checker a private network namespace, and it works inside the Nix
+  sandbox. Both of T9's acceptance checks therefore run in `nix flake check`.
+- `[human]` still to do: wire the module and a token file into the real host
+  configuration, and create the XFS partition G3 wants.
+
+### T10
+
+- `nix/jorb.alloy` is installed as its own file in Alloy's configuration
+  directory, with the remote-write endpoint substituted from a module option.
+  It keeps only series whose cgroup is under `/jorb.slice` and turns
+  `/jorb.slice/jorb-<id>.service` into `orb="<id>"`, which is the label every
+  panel groups by.
+- `nix/jorb-dashboard.json` is provisioned from its own directory, so the
+  owner's dashboards are untouched. Panels: CPU, memory and IO per orb; tap
+  bytes per slot; zram original against compressed; job duration by operation
+  and job outcomes from the JSON logs; a "no free slot" count; and the failed
+  jobs themselves. The datasources are dashboard variables, so it does not
+  assume what the owner's are called.
+- The module check also asserts the dashboard is JSON with at least one panel
+  and that every non-row panel carries a query.
+- `[host]` every panel returning data is T11's run, which is still awaiting
+  root. The zram panel also needs node_exporter's zram collector enabled, and
+  the tap panel its netdev collector.

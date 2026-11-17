@@ -1,0 +1,57 @@
+// What jorb adds to the host's Alloy: cgroup metrics for the orbs, labelled
+// by orb rather than by cgroup path.
+//
+// Installed as its own file so the owner's existing Alloy configuration is
+// never edited. Alloy reads every *.alloy file in its configuration
+// directory, so this composes rather than replaces. The module substitutes
+// @JORB_METRICS_ENDPOINT@ before installing it.
+
+// cAdvisor reports every cgroup on the host; the relabel step below is what
+// narrows it to jorb.slice. Container labels are off because an orb is a VM,
+// not a container, and has none.
+prometheus.exporter.cadvisor "jorb" {
+	store_container_labels = false
+	docker_only            = false
+}
+
+prometheus.scrape "jorb" {
+	targets         = prometheus.exporter.cadvisor.jorb.targets
+	forward_to      = [prometheus.relabel.jorb.receiver]
+	scrape_interval = "15s"
+	job_name        = "jorb"
+}
+
+prometheus.relabel "jorb" {
+	forward_to = [prometheus.remote_write.jorb.receiver]
+
+	// Everything outside the slice belongs to whatever else runs on this
+	// host, and the owner's own Alloy already has an opinion about that.
+	rule {
+		action        = "keep"
+		source_labels = ["id"]
+		regex         = "/jorb\\.slice(/.*)?"
+	}
+
+	// /jorb.slice/jorb-amp-T-1a2b.service becomes orb="amp-T-1a2b", which is
+	// the label every panel groups by.
+	rule {
+		action        = "replace"
+		source_labels = ["id"]
+		regex         = "/jorb\\.slice/jorb-(.+)\\.service"
+		target_label  = "orb"
+		replacement   = "$1"
+	}
+
+	// The cgroup path itself says nothing a dashboard needs once the orb is
+	// a label, and it makes series churn on every rename.
+	rule {
+		action = "labeldrop"
+		regex  = "name"
+	}
+}
+
+prometheus.remote_write "jorb" {
+	endpoint {
+		url = "@JORB_METRICS_ENDPOINT@"
+	}
+}
