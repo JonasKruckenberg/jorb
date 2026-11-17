@@ -80,6 +80,37 @@
       # The spec inside the source of the exact Cloud Hypervisor package the
       # shell installs, so the generated client cannot drift from the binary.
       chOpenapiSpec = pkgs: "${pkgs.cloud-hypervisor.src}/vmm/src/api/openapi/cloud-hypervisor.yaml";
+
+      # jorb-init is PID 1 in a guest with no loader and no libraries, so it is
+      # built against musl and statically linked. The guest runs the host's
+      # architecture, so this is not a cross-build in any real sense.
+      jorbInitFor =
+        pkgs:
+        let
+          craneLib = (crane.mkLib pkgs).overrideToolchain (rustToolchainFor pkgs);
+          target = "${pkgs.stdenv.hostPlatform.parsed.cpu.name}-unknown-linux-musl";
+          linkerVariable = "CARGO_TARGET_${
+            lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] target)
+          }_LINKER";
+          musl = pkgs.pkgsMusl.stdenv.cc;
+        in
+        craneLib.buildPackage {
+          pname = "jorb-init";
+          version = "0.1.0";
+          src = rustSource;
+          strictDeps = true;
+
+          cargoExtraArgs = "--package jorb-init";
+          CARGO_BUILD_TARGET = target;
+          CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
+          ${linkerVariable} = "${musl.targetPrefix}cc";
+          nativeBuildInputs = [ musl ];
+
+          # The workspace's tests run in the `test` check, on the host target.
+          doCheck = false;
+
+          meta.platforms = defaultSystems;
+        };
     in
     {
       formatter = forAllSystems (pkgs: pkgs.nixfmt);
@@ -127,7 +158,8 @@
 
       packages = forAllSystems (pkgs: {
         guest-kernel = pkgs.callPackage ./nix/kernel.nix { };
-        test-image = pkgs.callPackage ./nix/test-image.nix { };
+        test-image = pkgs.callPackage ./nix/test-image.nix { jorb-init = jorbInitFor pkgs; };
+        jorb-init = jorbInitFor pkgs;
       });
 
       # `nix flake check` runs what the Commands section of AGENTS.md lists:

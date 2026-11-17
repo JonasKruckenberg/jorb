@@ -131,24 +131,44 @@ fi
 # loader with a token that cannot work, and watch what the process does. The
 # answer we need is about process shape, not about the token.
 if [ -n "$loader" ]; then
+	# The image's libraries, not the host's: the host is NixOS and has no
+	# /usr/lib for this binary to find.
+	libraries=$rootfs/lib:$rootfs/usr/lib
+	for directory in "$rootfs"/lib/*-linux-gnu "$rootfs"/usr/lib/*-linux-gnu; do
+		if [ -d "$directory" ]; then
+			libraries=$libraries:$directory
+		fi
+	done
+
 	set +e
 	ORB_TOKEN=g6-dummy-token \
-		timeout 20 "$loader" "$amp" orb bootstrap >"$work/bootstrap.log" 2>&1 &
+		timeout 30 "$loader" --library-path "$libraries" "$amp" orb bootstrap \
+		>"$work/bootstrap.log" 2>&1 &
 	bootstrap=$!
 	sleep 10
-	children=$(pgrep -P "$bootstrap" 2>/dev/null | wc -l)
 	if kill -0 "$bootstrap" 2>/dev/null; then
-		evidence "bootstrap still running after 10s with $children children, so A8 holds"
+		evidence "bootstrap still running after 10s, children: $(pgrep -P "$bootstrap" | tr '\n' ' ')"
+		forked=no
 	else
 		wait "$bootstrap"
-		evidence "bootstrap exited with $? after less than 10s"
-		evidence "that is not yet proof it forks away: the dummy token may simply have been refused"
+		status=$?
+		evidence "bootstrap exited with $status in under 10s"
+		forked=$status
 	fi
 	kill "$bootstrap" 2>/dev/null
 	wait "$bootstrap" 2>/dev/null
 	set -e
+
 	evidence "bootstrap said:"
-	head -n 10 "$work/bootstrap.log" | sed 's/^/      /'
+	head -n 5 "$work/bootstrap.log" | sed 's/^/      /'
+
+	# Exiting non-zero with its own message is the foreground behaviour A8
+	# needs: it did the work and reported, rather than detaching and leaving
+	# PID 1 with nothing to wait for. A zero exit in under a second would be
+	# the opposite.
+	if [ "$forked" = 0 ]; then
+		fail "bootstrap returned 0 immediately, which looks like it forked away, so A8 does not hold"
+	fi
 fi
 
 pass "the image has glibc, setpriv, the user \`user\` and /usr/local/bin/amp; digest $digest"

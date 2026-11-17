@@ -136,6 +136,7 @@ wait_for_path() {
 # stop_test_vm when done, whatever the outcome.
 start_test_vm() {
 	local id=$1 slot=$2 mode=$3 init=$4
+	shift 4
 	local vcpus=${JORB_VCPUS:-4}
 	local memory_mib=${JORB_MEMORY_MIB:-6144}
 
@@ -158,7 +159,9 @@ start_test_vm() {
 
 	mkdir -p /run/jorb "$gate_work"
 	install -m 0600 "$image" "$gate_root_disk"
-	write_config_disk "$gate_config_disk" "JORB_GATE=$id"
+	# The marker G4 reads from /dev/vdb comes first; a caller may add its own
+	# keys after it.
+	write_config_disk "$gate_config_disk" "JORB_GATE=$id" "$@"
 
 	gate_cmdline="$(guest_cmdline "$slot" "$id" "$init") jorb.test=$mode"
 	local config
