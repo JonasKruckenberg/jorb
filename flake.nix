@@ -160,6 +160,7 @@
         guest-kernel = pkgs.callPackage ./nix/kernel.nix { };
         test-image = pkgs.callPackage ./nix/test-image.nix { jorb-init = jorbInitFor pkgs; };
         jorb-init = jorbInitFor pkgs;
+        jorb-prepare-image = pkgs.callPackage ./nix/image.nix { jorb-init = jorbInitFor pkgs; };
       });
 
       # `nix flake check` runs what the Commands section of AGENTS.md lists:

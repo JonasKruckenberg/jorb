@@ -9,10 +9,10 @@
 | T2 generated client spike | done, A9 and A10 verified |
 | T3 host gates | G1, G2, G8 pass; G3 needs the XFS partition; G4, G5, G7 await a root run |
 | T4 jorb-vmm API | done but for the host example |
-| T5 jorb-init | not started |
-| T6 base image script | not started |
-| T7 jorb types | not started |
-| T8 jorb primitives | not started |
+| T5 jorb-init | done but for the host run |
+| T6 base image script | done but for the host run |
+| T7 jorb types | done |
+| T8 jorb primitives | done, behaviour awaits T11 |
 | T9 NixOS module | not started |
 | T10 observability | not started |
 | T11 behaviour matrix | not started |
@@ -166,3 +166,55 @@ Notes:
   clean. The `[host]` half of T4's acceptance is `examples/boot.rs`, which
   boots the G4 image through the builder; it is awaiting the same root run as
   G4.
+
+### T6
+
+- `nix/image.nix` pins a digest per architecture and wraps
+  `nix/prepare-image.sh`, which is a script you can read on its own: the
+  wrapper passes it the repository, the digest, the jorb-init path and the
+  image size, and the body names them at the top.
+- Digests recorded on 2026-11-18: arm64
+  `sha256:e25e30674cc051a6477fe9b148da1627f4186828dbd18e3151deeaa0d8ce1e68`,
+  amd64
+  `sha256:a431746a91926c0686942b73ab0ccfa03e23eb96f5a647612e5948ec4e68729b`.
+  The `latest` tags move often: the arm64 digest changed between two G6 runs
+  less than an hour apart, which is the reason the plan pins one.
+- `skopeo copy` needs `--insecure-policy` on a host with no
+  `/etc/containers/policy.json`. The digest is the integrity check, and it is
+  the thing being pinned, so a signature policy would add nothing here.
+- `nix build .#jorb-prepare-image` passes, which runs shellcheck over the
+  combined script. Producing the base image itself needs root and is awaiting
+  a host run.
+
+### T7
+
+24 unit tests, including every rejection the plan asks for. Two notes:
+
+- `jorb` uses `anyhow` rather than error enums, as AGENTS.md's crate table
+  says, so the refusals are messages and the tests assert on them.
+- `ConfigDisk::new` takes references, because `secrecy::SecretString` is not
+  `Clone` by design, and copying the secret once at the edge is clearer than
+  threading an owned token through the operations.
+
+### T8
+
+- A near-miss worth recording: `recover` lists `jorb-*.service`, and the
+  provider's own unit is `jorb-provider.service`, which parses as an orb
+  called "provider". Reading the name alone, recover would have stopped the
+  provider that invoked it. It now asks systemd for each unit's slice and
+  only touches units in `jorb.slice`; the provider runs in `system.slice`.
+  There is a test for the name parsing and a comment at the check.
+- Every `systemctl` and `systemd-run` call passes `--no-ask-password`:
+  jorb runs from a service, and a polkit prompt would be an unbounded wait.
+- The lock is `File::try_lock` in a bounded loop rather than a blocking
+  `lock`, so the wait has a visible deadline like every other wait.
+- Smoke-tested unprivileged, against an empty state directory:
+
+  | Job | Result |
+  |---|---|
+  | `pause` on an absent orb | exit 0, `state_before=Absent state_after=Absent` |
+  | `delete` on an absent orb | exit 0 |
+  | `spawn` with no token | exit 1, "spawn needs ORB_TOKEN, and this job has none" |
+  | `spawn` with a token, no base image | exit 1, "opening the base image at ...; has jorb-prepare-image run?" |
+
+  The token appeared in zero log lines across those runs.
