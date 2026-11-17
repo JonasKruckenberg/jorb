@@ -149,6 +149,9 @@ impl VmBuilder {
     }
 
     /// Adds a read-only disk, in the same order as [`VmBuilder::disk`].
+    //
+    // ASSUMES A2: disks reach the guest in the order they are attached, so
+    // the root disk is /dev/vda and the config disk /dev/vdb. G4 checks it.
     #[must_use]
     pub fn read_only_disk(mut self, path: &Path) -> Self {
         self.disks.push(Disk {
@@ -172,6 +175,9 @@ impl VmBuilder {
 
     /// Asks the guest's balloon to report pages it frees, so freed guest
     /// memory stops being charged to the host.
+    //
+    // ASSUMES A5: free page reporting actually returns the memory to the
+    // host rather than only telling the guest it may. G5 checks it.
     #[must_use]
     pub fn free_page_reporting(mut self) -> Self {
         self.free_page_reporting = true;

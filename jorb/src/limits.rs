@@ -52,6 +52,9 @@ pub const GUEST_INTERFACE: &str = "eth0";
 
 /// The guest's serial console, which carries its output to the host's
 /// journal. The two architectures name the same thing differently.
+//
+// ASSUMES A3: what the guest writes to this port reaches the unit's journal.
+// G4 checks it.
 #[cfg(target_arch = "aarch64")]
 pub const CONSOLE_DEVICE: &str = "ttyAMA0";
 #[cfg(target_arch = "x86_64")]

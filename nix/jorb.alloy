@@ -6,6 +6,9 @@
 // directory, so this composes rather than replaces. The module substitutes
 // @JORB_METRICS_ENDPOINT@ before installing it.
 
+// ASSUMES A11: Alloy's cAdvisor exporter reports the /jorb.slice cgroups at
+// all, and the host's journal already reaches Loki. G7 checks both.
+//
 // cAdvisor reports every cgroup on the host; the relabel step below is what
 // narrows it to jorb.slice. Container labels are off because an orb is a VM,
 // not a container, and has none.

@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # The body of jorb-prepare-image. The wrapper around it sets
 # image_repository, image_digest, jorb_init and base_size.
 #

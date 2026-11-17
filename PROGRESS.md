@@ -5,30 +5,93 @@
 | Task | State |
 |---|---|
 | T0 repository skeleton | done |
-| T1 guest kernel | building, config check written |
-| T2 generated client spike | done, A9 and A10 verified |
-| T3 host gates | G1, G2, G8 pass; G3 needs the XFS partition; G4, G5, G7 await a root run |
-| T4 jorb-vmm API | done but for the host example |
-| T5 jorb-init | done but for the host run |
-| T6 base image script | done but for the host run |
+| T1 guest kernel | done on aarch64; the x86_64 half is written but unbuilt |
+| T2 generated client spike | done. A9 and A10 verified |
+| T3 host gates | G1, G2, G6 and G8 pass. G3 needs the XFS partition. G4, G5 and G7 await a run as root |
+| T4 jorb-vmm API | done but for the host example, which awaits G4's harness |
+| T5 jorb-init | done. The in-guest run awaits root |
+| T6 base image script | done. Producing the image awaits root |
 | T7 jorb types | done |
-| T8 jorb primitives | done, behaviour awaits T11 |
-| T9 NixOS module | done but for the [human] wiring |
-| T10 observability | written, panels await the T11 run |
-| T11 behaviour matrix | not started |
-| T12 end to end | not started |
+| T8 jorb primitives | done. Behaviour is T11's to verify |
+| T9 NixOS module | done. `[human]`: wire it and a token file into the host |
+| T10 observability | done. Panels returning data awaits T11's run |
+| T11 behaviour matrix | written, awaits a run as root |
+| T12 end to end | `[human]` |
+
+`nix flake check` passes from a clean checkout (verified by cloning the
+repository into a temporary directory and running it there). It covers
+formatting, clippy with the workspace's denied lints, the test suite (41 unit
+tests), evaluation of a host that enables the module, and `nft --check` over
+the network policy that host generates.
+
+What is left is everything that needs root on this machine, plus the owner's
+own steps. Nothing is blocked on a decision.
 
 ## Gate results
 
-Nothing run yet.
+| Gate | Result |
+|---|---|
+| G1 | PASS. 15673 MiB total, 12309 MiB available, so `memoryHigh = 11797M` |
+| G2 | PASS. `hpage_pmd_size` is 33554432 (32 MiB), so A6 holds |
+| G3 | FAIL. `/var/lib/jorb` does not exist; the XFS partition is the owner's step |
+| G4 | awaiting root |
+| G5 | awaiting root |
+| G6 | PASS. A7 and A8 hold; digest recorded |
+| G7 | awaiting root, and T10's Alloy file has to be installed first |
+| G8 | PASS. A12 holds: `nixpkgs#amp-cli` has `orb provider` |
+
+### Assumptions
+
+| ID | State |
+|---|---|
+| A1 Cloud Hypervisor boots a 4K guest on a 16K host | awaiting G4 |
+| A2 disks appear as vda then vdb | awaiting G4. Marked `// ASSUMES A2` in jorb-vmm and jorb-init |
+| A3 serial is the architecture's port and reaches the journal | awaiting G4. Marked `// ASSUMES A3` in jorb's limits |
+| A4 the guest clock is right at boot | awaiting G4 |
+| A5 free page reporting returns memory to the host | awaiting G5. Marked `// ASSUMES A5` in jorb-vmm |
+| A6 the host's PMD huge page is 32 MiB | verified by G2 |
+| A7 the image has glibc, setpriv, user `user`, /usr/local/bin/amp | verified by G6, with one correction below |
+| A8 `amp orb bootstrap` stays in the foreground | verified by G6 |
+| A9 progenitor accepts the spec | verified by T2, with two patches |
+| A10 a progenitor client works over reqwest's unix socket | verified by T2 against a live VMM |
+| A11 Alloy's cAdvisor exporter sees /jorb.slice; the journal reaches Loki | awaiting G7. Marked `ASSUMES A11` in nix/jorb.alloy |
+| A12 an `amp` with `orb provider` is installable here | verified by G8 |
+
+A7 needs one correction: `/usr/local/bin/amp` in the image is a symlink to
+`/home/user/.amp/bin/amp`, which does exist in the image. jorb-init execs the
+symlink, so this works, but the binary behind it is the one Amp replaces on
+startup.
 
 ## Open questions
 
-Nothing open.
+1. `AGENTS.md` describes the host as having 8 GiB of memory; this machine
+   reports 15673 MiB. The G1 figure above is from the machine, not the
+   document.
+2. G1 was read with no observability stack running and no zram configured, so
+   it is an upper bound rather than the steady state the plan asks about.
+   Worth re-reading once T9 and T10 are actually on the host.
+3. This session has no passwordless sudo, so G3, G4, G5, G7, T5's in-guest
+   run, T6's image build and all of T11 are written but unrun. They need
+   either a root shell or a sudo rule.
+4. The `latest` tags on the Amp orb images move often: the arm64 digest
+   changed between two G6 runs less than an hour apart. T6 pins a digest, and
+   refreshing it means running G6 again.
+5. x86_64 is prepared throughout but nothing has been built or run on an
+   x86_64 host. The guest kernel fragment for it, the PVH boot path and the
+   amd64 image digest are all unexercised.
 
 ## Proposals
 
-Nothing proposed.
+1. **The provider's unit name collides with the orbs'.** `jorb-provider.service`
+   matches the `jorb-*.service` pattern recover looks for, and parses as an orb
+   called "provider". Recover now also requires `jorb.slice`, which the
+   provider is not in, so the current code is safe. A fixed interface that
+   cannot collide at all would be a separate prefix for orb units, for example
+   `jorb-orb-<id>.service`. That is a change to Fixed interfaces, so it is a
+   proposal rather than a change.
+2. **x86_64 hosts.** Added at the owner's request during this session. It
+   changes one thing in Fixed interfaces: the cmdline's console is `ttyS0` on
+   x86_64 rather than `ttyAMA0`. Everything else is per-architecture Nix.
 
 ## Notes per task
 
@@ -262,3 +325,25 @@ Notes:
 - `[host]` every panel returning data is T11's run, which is still awaiting
   root. The zram panel also needs node_exporter's zram collector enabled, and
   the tap panel its netdev collector.
+
+### T11
+
+- `tests/host/matrix.sh` runs the seven sections, each printing its own PASS
+  or FAIL line plus evidence, with one summary line at the end. It takes
+  section numbers as arguments so a single section can be rerun.
+- An orb's state is read from outside jorb: `systemctl is-active`, the VMM's
+  own `vm.info` over the socket, and whether the disk file is there. That way
+  a section can fail even if jorb's own idea of the state is wrong.
+- Section 4 needs probes from inside the guest, and the guest cannot work out
+  the host's LAN address by itself. The matrix writes those two addresses into
+  its own copy of the base image with `debugfs`, and the test image's
+  stand-in for `amp orb bootstrap` probes them and prints the results. jorb
+  has no hooks for any of this: the scaffolding is all inside the test image.
+- Section 5 picks the memory workload with the token it spawns with, because
+  the token is the only per-job value the matrix can choose.
+- Three bugs found by rereading it before running anything: the wipe between
+  sections deleted its own base image, a `[ ... ] && x=y` would have exited
+  the script under `set -e` for pause and delete, and `pause` on an orb that
+  never existed was expected to leave a disk behind.
+- Awaiting a run as root. It is the only thing that can turn T8's "behaviour
+  verified in T11" into a result.

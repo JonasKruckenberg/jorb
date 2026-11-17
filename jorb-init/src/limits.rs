@@ -5,7 +5,11 @@
 /// the disk's real length is.
 pub const CONFIG_DISK_BYTES: usize = 4096;
 
-/// Where the config disk arrives. Second disk in attach order (A2), read-only.
+/// Where the config disk arrives: the second disk in attach order,
+/// read-only.
+//
+// ASSUMES A2: the second disk attached is the one that appears here. G4
+// checks it.
 pub const CONFIG_DISK_DEVICE: &str = "/dev/vdb";
 
 /// The image's own environment, written into the base image by
