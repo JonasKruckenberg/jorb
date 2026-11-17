@@ -4,6 +4,8 @@
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
 
+    crane.url = "github:ipetkov/crane";
+
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -14,6 +16,7 @@
     {
       self,
       nixpkgs,
+      crane,
       rust-overlay,
     }:
     let
@@ -50,6 +53,34 @@
           ./jorb-vmm
         ];
       };
+
+      rustToolchainFor = pkgs: pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+
+      # The workspace as crane sees it. `cargoArtifacts` builds the dependency
+      # tree once so the test and clippy checks share it.
+      workspaceFor =
+        pkgs:
+        let
+          craneLib = (crane.mkLib pkgs).overrideToolchain (rustToolchainFor pkgs);
+          # The workspace root is virtual, so crane has no package to read these
+          # from.
+          commonArgs = {
+            pname = "jorb-workspace";
+            version = "0.1.0";
+            src = rustSource;
+            strictDeps = true;
+            CH_OPENAPI_SPEC = chOpenapiSpec pkgs;
+          };
+        in
+        {
+          inherit craneLib commonArgs;
+          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        };
+
+      # The spec inside the source of the exact Cloud Hypervisor package the
+      # shell installs, so the generated client cannot drift from the binary.
+      chOpenapiSpec =
+        pkgs: "${pkgs.cloud-hypervisor.src}/vmm/src/api/openapi/cloud-hypervisor.yaml";
     in
     {
       formatter = forAllSystems (pkgs: pkgs.nixfmt);
@@ -57,7 +88,7 @@
       devShells = forAllSystems (
         pkgs:
         let
-          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          rustToolchain = rustToolchainFor pkgs;
         in
         {
           default = pkgs.mkShell {
@@ -90,7 +121,7 @@
               ];
 
             # T2: build.rs generates the VMM client from this spec.
-            CH_OPENAPI_SPEC = "${pkgs.cloud-hypervisor.src}/vmm/src/api/openapi/cloud-hypervisor.yaml";
+            CH_OPENAPI_SPEC = chOpenapiSpec pkgs;
           };
         }
       );
@@ -100,36 +131,20 @@
       checks = forAllSystems (
         pkgs:
         let
-          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-          rustPlatform = pkgs.makeRustPlatform {
-            cargo = rustToolchain;
-            rustc = rustToolchain;
-          };
-          workspace = rustPlatform.buildRustPackage {
-            pname = "jorb-workspace";
-            version = "0.1.0";
-            src = rustSource;
-            cargoLock.lockFile = ./Cargo.lock;
-            CH_OPENAPI_SPEC = "${pkgs.cloud-hypervisor.src}/vmm/src/api/openapi/cloud-hypervisor.yaml";
-          };
+          inherit (workspaceFor pkgs) craneLib commonArgs cargoArtifacts;
         in
         {
-          # Builds the workspace and runs `cargo test` in the check phase.
-          test = workspace;
+          test = craneLib.cargoTest (commonArgs // { inherit cargoArtifacts; });
 
-          clippy = workspace.overrideAttrs (previous: {
-            pname = "jorb-clippy";
-            nativeBuildInputs = previous.nativeBuildInputs ++ [ rustToolchain ];
-            buildPhase = "cargo clippy --offline --workspace --all-targets -- -D warnings";
-            doCheck = false;
-            installPhase = "touch $out";
-          });
+          clippy = craneLib.cargoClippy (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              cargoClippyExtraArgs = "--all-targets -- -D warnings";
+            }
+          );
 
-          fmt = pkgs.runCommand "jorb-fmt" { nativeBuildInputs = [ rustToolchain ]; } ''
-            cd ${rustSource}
-            cargo fmt --all --check
-            touch $out
-          '';
+          fmt = craneLib.cargoFmt { inherit (commonArgs) pname version src; };
         }
       );
     };
