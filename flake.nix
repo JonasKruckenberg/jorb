@@ -21,10 +21,10 @@
     }:
     let
       inherit (nixpkgs) lib;
+      # Linux only: Cloud Hypervisor needs KVM, and a jorb host boots guests of
+      # its own architecture.
       defaultSystems = [
-        "aarch64-darwin"
         "aarch64-linux"
-        "x86_64-darwin"
         "x86_64-linux"
       ];
       forAllSystems =
@@ -79,8 +79,7 @@
 
       # The spec inside the source of the exact Cloud Hypervisor package the
       # shell installs, so the generated client cannot drift from the binary.
-      chOpenapiSpec =
-        pkgs: "${pkgs.cloud-hypervisor.src}/vmm/src/api/openapi/cloud-hypervisor.yaml";
+      chOpenapiSpec = pkgs: "${pkgs.cloud-hypervisor.src}/vmm/src/api/openapi/cloud-hypervisor.yaml";
     in
     {
       formatter = forAllSystems (pkgs: pkgs.nixfmt);
@@ -92,39 +91,41 @@
         in
         {
           default = pkgs.mkShell {
-            packages =
-              [
-                rustToolchain
+            packages = [
+              rustToolchain
 
-                # scratch work and long-running host gates
-                pkgs.tmux
+              # scratch work and long-running host gates
+              pkgs.tmux
 
-                # base image (T6): pull, unpack, build the ext4, inspect it
-                pkgs.skopeo
-                pkgs.umoci
-                pkgs.e2fsprogs
-                pkgs.util-linux
-                pkgs.coreutils
+              # base image (T6): pull, unpack, build the ext4, inspect it
+              pkgs.skopeo
+              pkgs.umoci
+              pkgs.e2fsprogs
+              pkgs.util-linux
+              pkgs.coreutils
 
-                # scripts and data wrangling in tests/host
-                pkgs.jq
-                pkgs.shellcheck
-                pkgs.ripgrep
-                pkgs.fd
-              ]
-              ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-                # the VMM itself, plus the host-side pieces its gates touch
-                pkgs.cloud-hypervisor
-                pkgs.iproute2
-                pkgs.nftables
-                pkgs.xfsprogs
-              ];
+              # scripts and data wrangling in tests/host
+              pkgs.jq
+              pkgs.shellcheck
+              pkgs.ripgrep
+              pkgs.fd
+
+              # the VMM itself, plus the host-side pieces its gates touch
+              pkgs.cloud-hypervisor
+              pkgs.iproute2
+              pkgs.nftables
+              pkgs.xfsprogs
+            ];
 
             # T2: build.rs generates the VMM client from this spec.
             CH_OPENAPI_SPEC = chOpenapiSpec pkgs;
           };
         }
       );
+
+      packages = forAllSystems (pkgs: {
+        guest-kernel = pkgs.callPackage ./nix/kernel.nix { };
+      });
 
       # `nix flake check` runs what the Commands section of AGENTS.md lists:
       # formatting, clippy and the test suite, plus Nix evaluation.
