@@ -1,5 +1,5 @@
 [workspace]
-members = ["jorb", "jorb-config-disk", "jorb-init", "jorb-vmm"]
+members = ["jorb", "jorb-config-disk", "jorb-init"]
 resolver = "3"
 
 [workspace.package]

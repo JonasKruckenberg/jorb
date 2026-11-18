@@ -1,8 +1,8 @@
-//! What this host is configured as: how many orbs it runs, how big each is,
-//! and where its files and programs are.
+//! What this host is, from `JORB_*` variables the root-side wrapper sets, and
+//! where its files are. None of it is the caller's to choose.
 //!
-//! Every value comes from a `JORB_*` variable the root-side wrapper sets, so
-//! none of it is the caller's to choose. See Security in `AGENTS.md`.
+//! The state directory holds the base image, the lock and `disks/<id>.raw`;
+//! the run directory, a tmpfs, holds each orb's config disk and API socket.
 
 use std::num::{NonZeroU8, NonZeroU32};
 use std::path::PathBuf;
@@ -10,64 +10,94 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, ensure};
 
+use crate::job::OrbId;
 use crate::{Environment, limits, required};
-
-/// Where the base image and the orbs' disks live, unless `JORB_STATE_DIR` says.
-const STATE_DIRECTORY: &str = "/var/lib/jorb";
-
-/// Where the config disks and API sockets live, unless `JORB_RUN_DIR` says.
-const RUN_DIRECTORY: &str = "/run/jorb";
-
-/// The VMM, by name, unless `JORB_CH_BIN` gives a path.
-const CLOUD_HYPERVISOR: &str = "cloud-hypervisor";
 
 #[derive(Debug)]
 pub struct Settings {
-    /// How many orbs may run at once, `1..=MAX_SLOTS`.
+    /// `1..=MAX_SLOTS`.
     pub slots: u16,
     pub vcpus: NonZeroU8,
     pub memory_mib: NonZeroU32,
     pub kernel: PathBuf,
-    /// XFS, so each orb's disk is a reflink clone.
     pub state_directory: PathBuf,
-    /// A tmpfs, so a host reboot clears every config disk.
     pub run_directory: PathBuf,
-    /// A setting so the bounds tests can point it at a program that never
-    /// opens its socket.
+    /// `ch-remote` is the API client beside it.
     pub cloud_hypervisor: PathBuf,
 }
 
 impl Settings {
     pub fn from_environment(environment: Environment) -> Result<Self> {
-        let slots = setting(environment, "JORB_SLOTS", 1)?;
+        let settings = Self {
+            slots: parsed(environment, "JORB_SLOTS")?,
+            vcpus: parsed(environment, "JORB_VCPUS")?,
+            memory_mib: parsed(environment, "JORB_MEMORY_MIB")?,
+            kernel: parsed(environment, "JORB_KERNEL")?,
+            state_directory: parsed(environment, "JORB_STATE_DIR")?,
+            run_directory: parsed(environment, "JORB_RUN_DIR")?,
+            cloud_hypervisor: parsed(environment, "JORB_CH_BIN")?,
+        };
         ensure!(
-            (1..=limits::MAX_SLOTS).contains(&slots),
-            "JORB_SLOTS is {slots}, and a host has between 1 and {} slots",
+            (1..=limits::MAX_SLOTS).contains(&settings.slots),
+            "JORB_SLOTS must be between 1 and {}",
             limits::MAX_SLOTS
         );
+        Ok(settings)
+    }
 
-        Ok(Self {
-            slots,
-            vcpus: setting(environment, "JORB_VCPUS", limits::DEFAULT_VCPUS)?,
-            memory_mib: setting(environment, "JORB_MEMORY_MIB", limits::DEFAULT_MEMORY_MIB)?,
-            kernel: required(environment, "JORB_KERNEL")?.into(),
-            state_directory: setting(environment, "JORB_STATE_DIR", STATE_DIRECTORY.into())?,
-            run_directory: setting(environment, "JORB_RUN_DIR", RUN_DIRECTORY.into())?,
-            cloud_hypervisor: setting(environment, "JORB_CH_BIN", CLOUD_HYPERVISOR.into())?,
-        })
+    pub fn base_image_path(&self) -> PathBuf {
+        self.state_directory.join("base.raw")
+    }
+
+    pub fn lock_path(&self) -> PathBuf {
+        self.state_directory.join("lock")
+    }
+
+    /// Disks and the partial disk share a directory, so the rename between
+    /// them is atomic.
+    pub fn disks_directory(&self) -> PathBuf {
+        self.state_directory.join("disks")
+    }
+
+    /// One name for the host, because one job runs at a time.
+    pub fn partial_disk_path(&self) -> PathBuf {
+        self.disks_directory().join(".tmp")
+    }
+
+    pub fn disk_path(&self, orb: &OrbId) -> PathBuf {
+        self.disks_directory().join(format!("{orb}.raw"))
+    }
+
+    pub fn config_disk_path(&self, orb: &OrbId) -> PathBuf {
+        self.run_directory.join(format!("{orb}.cfg"))
+    }
+
+    pub fn api_socket_path(&self, orb: &OrbId) -> PathBuf {
+        self.run_directory.join(format!("{orb}.sock"))
     }
 }
 
-/// A setting, or its default when the variable is not set.
-fn setting<T>(environment: Environment, name: &str, default: T) -> Result<T>
+fn parsed<T>(environment: Environment, name: &str) -> Result<T>
 where
     T: FromStr,
     T::Err: std::error::Error + Send + Sync + 'static,
 {
-    match environment(name)? {
-        Some(raw) => raw.parse().with_context(|| format!("{name} is {raw:?}")),
-        None => Ok(default),
-    }
+    let raw = required(environment, name)?;
+    raw.parse().with_context(|| format!("{name} is {raw:?}"))
+}
+
+#[cfg(test)]
+pub fn test_settings(state_directory: &str, run_directory: &str) -> Settings {
+    Settings::from_environment(&crate::test_environment(&[
+        ("JORB_SLOTS", "1"),
+        ("JORB_VCPUS", "4"),
+        ("JORB_MEMORY_MIB", "6144"),
+        ("JORB_KERNEL", "/var/lib/jorb/kernel"),
+        ("JORB_STATE_DIR", state_directory),
+        ("JORB_RUN_DIR", run_directory),
+        ("JORB_CH_BIN", "/bin/cloud-hypervisor"),
+    ]))
+    .unwrap()
 }
 
 #[cfg(test)]
@@ -75,40 +105,48 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::test_environment;
 
     #[test]
-    fn the_settings_describe_the_v1_machine_by_default() {
-        let settings = Settings::from_environment(&test_environment(&[(
-            "JORB_KERNEL",
-            "/var/lib/jorb/kernel",
-        )]))
-        .unwrap();
+    fn the_layout_is_the_fixed_interface() {
+        let settings = test_settings("/var/lib/jorb", "/run/jorb");
+        let orb: OrbId = "amp-1".parse().unwrap();
 
-        assert_eq!(settings.slots, 1);
-        assert_eq!(settings.vcpus.get(), 4);
-        assert_eq!(settings.memory_mib.get(), 6144);
-        assert_eq!(settings.state_directory, Path::new("/var/lib/jorb"));
-        assert_eq!(settings.run_directory, Path::new("/run/jorb"));
-        assert_eq!(settings.cloud_hypervisor, Path::new("cloud-hypervisor"));
+        for (path, expected) in [
+            (settings.base_image_path(), "/var/lib/jorb/base.raw"),
+            (settings.lock_path(), "/var/lib/jorb/lock"),
+            (settings.partial_disk_path(), "/var/lib/jorb/disks/.tmp"),
+            (settings.disk_path(&orb), "/var/lib/jorb/disks/amp-1.raw"),
+            (settings.config_disk_path(&orb), "/run/jorb/amp-1.cfg"),
+            (settings.api_socket_path(&orb), "/run/jorb/amp-1.sock"),
+        ] {
+            assert_eq!(path, Path::new(expected));
+        }
     }
 
     #[test]
-    fn a_setting_outside_what_the_host_can_express_is_refused() {
+    fn every_setting_is_required_and_checked() {
+        assert!(Settings::from_environment(&crate::test_environment(&[])).is_err());
+
         for (name, value) in [
             ("JORB_SLOTS", "0"),
             ("JORB_SLOTS", "257"),
             ("JORB_VCPUS", "0"),
-            ("JORB_MEMORY_MIB", "lots"),
         ] {
-            let environment =
-                test_environment(&[("JORB_KERNEL", "/var/lib/jorb/kernel"), (name, value)]);
+            let mut variables = vec![
+                ("JORB_SLOTS", "1"),
+                ("JORB_VCPUS", "4"),
+                ("JORB_MEMORY_MIB", "6144"),
+                ("JORB_KERNEL", "/k"),
+                ("JORB_STATE_DIR", "/s"),
+                ("JORB_RUN_DIR", "/r"),
+                ("JORB_CH_BIN", "/c"),
+            ];
+            variables.retain(|(existing, _)| *existing != name);
+            variables.push((name, value));
             assert!(
-                Settings::from_environment(&environment).is_err(),
-                "{name}={value} should be refused"
+                Settings::from_environment(&crate::test_environment(&variables)).is_err(),
+                "{name}={value}"
             );
         }
-
-        assert!(Settings::from_environment(&test_environment(&[])).is_err());
     }
 }

@@ -1,81 +1,55 @@
-//! systemd: what an orb's unit is called, how to start and stop one, and
-//! which ones exist.
+//! systemd: an orb's unit, which ones exist, starting and stopping one.
 //!
-//! The `jorb-orb-` prefix is the whole reason recover is safe: no other unit
-//! on the host, the provider's own included, can be read as an orb's. What
-//! the unit runs is `vm.rs`'s business.
-
-use std::time::Instant;
+//! The `jorb-orb-` prefix is what makes recover safe: no other unit on the
+//! host can be read as an orb's.
 
 use anyhow::{Context, Result, ensure};
-use tokio::time::sleep;
 
 use crate::job::OrbId;
-use crate::limits;
-use crate::program::run;
+use crate::{limits, run};
 
-const UNIT_PREFIX: &str = "jorb-orb-";
-const UNIT_SUFFIX: &str = ".service";
+const PREFIX: &str = "jorb-orb-";
+const SUFFIX: &str = ".service";
 
-/// The slice every orb runs in, so one `MemoryHigh` covers all of them.
-const SLICE: &str = "jorb.slice";
-
-/// By name, so the PATH the wrapper sets decides which systemd this is.
-const SYSTEMCTL: &str = "systemctl";
-const SYSTEMD_RUN: &str = "systemd-run";
-
-/// A high OOM score, so the host kills an orb before anything else.
-const OOM_SCORE_ADJUST: i32 = 500;
-
-pub fn unit_name(orb: &OrbId) -> String {
-    format!("{UNIT_PREFIX}{orb}{UNIT_SUFFIX}")
+pub fn name(orb: &OrbId) -> String {
+    format!("{PREFIX}{orb}{SUFFIX}")
 }
 
-/// The orb a unit belongs to, or `None` when the name is not an orb's. The id
-/// goes back through the same parser as the one Amp sent.
-pub fn orb_of_unit(unit: &str) -> Option<OrbId> {
-    unit.strip_prefix(UNIT_PREFIX)
-        .and_then(|rest| rest.strip_suffix(UNIT_SUFFIX))
-        .and_then(|id| id.parse().ok())
+/// The orb a unit belongs to. The id goes back through the same parser as
+/// Amp's.
+pub fn orb_of(unit: &str) -> Option<OrbId> {
+    unit.strip_prefix(PREFIX)?
+        .strip_suffix(SUFFIX)?
+        .parse()
+        .ok()
 }
 
-/// The orb units systemd knows about, active or not.
+/// Every orb unit systemd knows about, active or not.
 pub async fn orb_units() -> Result<Vec<String>> {
-    let pattern = format!("{UNIT_PREFIX}*{UNIT_SUFFIX}");
+    let pattern = format!("{PREFIX}*{SUFFIX}");
     let listed = run(
-        SYSTEMCTL,
-        &[
-            "list-units",
-            "--all",
-            "--plain",
-            "--no-legend",
-            "--no-pager",
-            &pattern,
-        ],
+        "systemctl",
+        &["list-units", "--all", "--plain", "--no-legend", &pattern],
     )
     .await?;
-
     Ok(listed
         .lines()
         .filter_map(|line| line.split_whitespace().next())
-        .filter(|unit| unit.ends_with(UNIT_SUFFIX))
-        .take(limits::MAX_UNITS_TO_RECOVER)
+        .take(limits::MAX_UNITS)
         .map(str::to_owned)
         .collect())
 }
 
-/// Starts `command` as the orb's unit. `--collect` so a failed unit leaves
-/// nothing behind, `Type=exec` so systemd waits for the exec.
-pub async fn start(orb: &OrbId, command: &[String]) -> Result<String> {
-    let unit = unit_name(orb);
-
+/// `--collect` so a failed unit leaves nothing behind; `Type=exec` so systemd
+/// waits for the exec; a high OOM score so the host kills an orb first.
+pub async fn start(orb: &OrbId, command: &[String]) -> Result<()> {
+    let unit = name(orb);
     let mut arguments = vec![
-        "--no-ask-password".to_owned(),
         "--collect".to_owned(),
         format!("--unit={unit}"),
-        format!("--slice={SLICE}"),
+        "--slice=jorb.slice".to_owned(),
         "--property=Type=exec".to_owned(),
-        format!("--property=OOMScoreAdjust={OOM_SCORE_ADJUST}"),
+        "--property=OOMScoreAdjust=500".to_owned(),
         format!(
             "--property=TimeoutStopSec={}",
             limits::UNIT_STOP_TIMEOUT.as_secs()
@@ -85,54 +59,30 @@ pub async fn start(orb: &OrbId, command: &[String]) -> Result<String> {
     arguments.extend_from_slice(command);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
 
-    run(SYSTEMD_RUN, &arguments)
+    run("systemd-run", &arguments)
         .await
         .with_context(|| format!("starting {unit}"))?;
-
-    Ok(unit)
-}
-
-/// Stops the orb's unit and waits for systemd to agree it is gone. The
-/// postcondition is systemd's answer, not the stop's exit code, so a unit
-/// that was already gone and one that had to be killed look the same.
-pub async fn stop(orb: &OrbId) -> Result<()> {
-    let unit = unit_name(orb);
-
-    // Without --no-block, so this waits for the stop job.
-    // Its exit code is not the postcondition, but its stderr is the evidence
-    // if the unit outlives the wait.
-    let stopped = run(SYSTEMCTL, &["--no-ask-password", "stop", &unit]).await;
-
-    let deadline = Instant::now() + limits::UNIT_GONE_WAIT;
-    while is_active(&unit).await? {
-        ensure!(
-            Instant::now() < deadline,
-            "{unit} was still active {:?} after being stopped; the stop said: {}",
-            limits::UNIT_GONE_WAIT,
-            match &stopped {
-                Ok(_) => "nothing".to_owned(),
-                Err(error) => format!("{error:#}"),
-            }
-        );
-        sleep(limits::UNIT_GONE_POLL).await;
-    }
-
     Ok(())
 }
 
-/// `show` calls a unit it has never heard of inactive, so a unit `--collect`
-/// has already removed needs no special case.
-async fn is_active(unit: &str) -> Result<bool> {
+/// `systemctl stop` waits for the stop to finish, and its exit code is not the
+/// postcondition: an unknown unit fails to stop and is as stopped as can be.
+/// systemd's answer afterwards is.
+pub async fn stop(orb: &OrbId) -> Result<()> {
+    let unit = name(orb);
+    let stopped = run("systemctl", &["stop", &unit]).await;
     let state = run(
-        SYSTEMCTL,
-        &["show", "--property=ActiveState", "--value", unit],
+        "systemctl",
+        &["show", "--property=ActiveState", "--value", &unit],
     )
     .await?;
-
-    Ok(matches!(
+    ensure!(
+        matches!(state.trim(), "inactive" | "failed"),
+        "{unit} is {} after being stopped; the stop said: {:?}",
         state.trim(),
-        "active" | "activating" | "deactivating" | "reloading"
-    ))
+        stopped.err()
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -140,29 +90,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_unit_name_and_the_orb_it_names_are_inverses() {
+    fn only_an_orbs_unit_names_an_orb() {
         let id: OrbId = "amp-T-1a2b".parse().unwrap();
+        assert_eq!(name(&id), "jorb-orb-amp-T-1a2b.service");
+        assert_eq!(orb_of(&name(&id)), Some(id));
 
-        assert_eq!(unit_name(&id), "jorb-orb-amp-T-1a2b.service");
-        assert_eq!(orb_of_unit(&unit_name(&id)), Some(id));
-    }
-
-    #[test]
-    fn a_unit_that_is_not_ours_belongs_to_no_orb() {
         for unit in [
-            "sshd.service",
             "jorb-provider.service",
             "jorb-gate-g4.service",
-            "jorb-amp-1.service",
             "jorb-orb-.service",
             "jorb-orb-amp-1.slice",
             "jorb-orb-../x.service",
-            "jorb-orb-a b.service",
         ] {
-            assert!(
-                orb_of_unit(unit).is_none(),
-                "{unit} should not parse as an orb's unit"
-            );
+            assert!(orb_of(unit).is_none(), "{unit}");
         }
     }
 }

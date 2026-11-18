@@ -1,72 +1,44 @@
-//! The fixed VM shape and booting it: the slot an orb runs in, the cmdline its
-//! guest is told, the VMM's own command line, and the call into `jorb-vmm`.
+//! The fixed VM shape as Cloud Hypervisor's command line, and the one
+//! question jorb asks a VMM: is your VM running?
 //!
-//! A slot is free when its tap is absent. Cloud Hypervisor creates the tap on
-//! boot and it goes away with the process, so the tap is the only record of a
-//! slot being taken.
+//! The whole configuration is on the command line, so the VMM boots the VM
+//! as it starts and exits when the guest powers off. A slot is free when its
+//! tap is absent: the VMM creates the tap and it goes with the process.
 
-use std::io::ErrorKind;
 use std::net::Ipv4Addr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
-use jorb_vmm::{Tap, VmShape, VmState};
-use tokio::net::UnixStream;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 
-use crate::disk;
 use crate::job::OrbId;
-use crate::limits;
-use crate::program::run;
 use crate::settings::Settings;
+use crate::{limits, run};
 
-/// Taps are `jorb<S>`.
+/// Slot S is `10.77.S.0/30`: the host takes `.1`, the guest `.2`.
+const SLOT_NETWORK: [u8; 2] = [10, 77];
+const NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 252);
 const TAP_PREFIX: &str = "jorb";
 
-/// Where the kernel lists interfaces.
-const SYS_CLASS_NET: &str = "/sys/class/net";
-
-/// Slot S is `10.77.S.0/30`: the host takes `.1` and the guest `.2`.
-const SLOT_NETWORK: [u8; 2] = [10, 77];
-const HOST_PART: u8 = 1;
-const GUEST_PART: u8 = 2;
-
-/// The first disk attached, which is the orb's own.
-const ROOT_DEVICE: &str = "/dev/vda";
-
-/// A slot's network is a /30: the host's address, the guest's, nothing else.
-const GUEST_NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 252);
-
-/// The serial port, which carries the guest's output to the unit's journal.
-const CONSOLE_DEVICE: &str = "ttyAMA0";
-const GUEST_INIT: &str = "/jorb-init";
+const CMDLINE_FIXED: &str = "console=ttyAMA0 root=/dev/vda rw init=/jorb-init";
 const GUEST_INTERFACE: &str = "eth0";
+/// Public resolvers: an orb may not reach the host's.
+const DNS: &str = "1.1.1.1:9.9.9.9";
 
-/// The nftables table that holds the network policy, from the Nix module.
-const POLICY_FAMILY: &str = "inet";
-const POLICY_TABLE: &str = "jorb";
+/// The table holding the network policy, from the Nix module.
+const POLICY_TABLE: [&str; 2] = ["inet", "jorb"];
 
-/// By name, so the PATH the wrapper sets decides which nft this is.
-const NFT: &str = "nft";
-
-/// Public resolvers, because orbs may not talk to anything on the host's
-/// network, its resolver included.
-const PRIMARY_DNS: &str = "1.1.1.1";
-const SECONDARY_DNS: &str = "9.9.9.9";
-
-/// One orb's place on the host: its tap and its two addresses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct Slot(u8);
 
 impl Slot {
-    /// The lowest free slot. No free slot is the host's capacity error, and
-    /// there is no other.
+    /// No free slot is the capacity error, and there is no other.
     pub fn lowest_free(settings: &Settings) -> Result<Self> {
         (0..=u8::MAX)
             .take(usize::from(settings.slots))
             .map(Self)
-            .find(|slot| slot.is_free())
+            .find(|slot| !Path::new("/sys/class/net").join(slot.tap()).exists())
             .with_context(|| format!("no free slot: all {} are taken", settings.slots))
     }
 
@@ -74,194 +46,112 @@ impl Slot {
         self.0
     }
 
-    fn is_free(self) -> bool {
-        !Path::new(SYS_CLASS_NET).join(self.tap_name()).exists()
-    }
-
-    fn tap_name(self) -> String {
+    fn tap(self) -> String {
         format!("{TAP_PREFIX}{}", self.0)
     }
 
-    /// `10.77.S.1`.
-    fn host_address(self) -> Ipv4Addr {
+    fn address(self, host_part: u8) -> Ipv4Addr {
         let [first, second] = SLOT_NETWORK;
-        Ipv4Addr::new(first, second, self.0, HOST_PART)
-    }
-
-    /// `10.77.S.2`.
-    fn guest_address(self) -> Ipv4Addr {
-        let [first, second] = SLOT_NETWORK;
-        Ipv4Addr::new(first, second, self.0, GUEST_PART)
+        Ipv4Addr::new(first, second, self.0, host_part)
     }
 }
 
-/// What the guest is told at boot. The network comes from the kernel's `ip=`,
-/// so nothing inside the guest configures an interface.
-fn cmdline(slot: Slot, orb: &OrbId) -> String {
-    format!(
-        "console={CONSOLE_DEVICE} root={ROOT_DEVICE} rw init={GUEST_INIT} \
-         ip={guest}::{host}:{GUEST_NETMASK}:{orb}:{GUEST_INTERFACE}:off:{PRIMARY_DNS}:{SECONDARY_DNS}",
-        guest = slot.guest_address(),
-        host = slot.host_address(),
-    )
-}
+/// The orb's VMM, as its unit runs it.
+pub fn command(settings: &Settings, orb: &OrbId, slot: Slot) -> Vec<String> {
+    let (host, guest) = (slot.address(1), slot.address(2));
+    let path = |path: &Path| path.display().to_string();
 
-/// The socket the orb's VMM listens on.
-pub fn api_socket_path(settings: &Settings, orb: &OrbId) -> PathBuf {
-    settings.run_directory.join(format!("{orb}.sock"))
-}
-
-/// What the orb's unit runs: the VMM, listening on the orb's API socket and
-/// waiting to be given a VM.
-pub fn vmm_command(settings: &Settings, orb: &OrbId) -> Vec<String> {
     vec![
-        settings.cloud_hypervisor.to_string_lossy().into_owned(),
-        format!("--api-socket={}", api_socket_path(settings, orb).display()),
+        path(&settings.cloud_hypervisor),
+        format!("--api-socket={}", settings.api_socket_path(orb).display()),
+        "--kernel".into(),
+        path(&settings.kernel),
+        "--cmdline".into(),
+        format!("{CMDLINE_FIXED} ip={guest}::{host}:{NETMASK}:{orb}:{GUEST_INTERFACE}:off:{DNS}"),
+        "--cpus".into(),
+        format!("boot={}", settings.vcpus),
+        "--memory".into(),
+        format!("size={}M,thp=off", settings.memory_mib),
+        // Root first, so it is /dev/vda; both are raw, which the VMM requires
+        // to be said.
+        "--disk".into(),
+        format!("path={},image_type=raw", settings.disk_path(orb).display()),
+        format!(
+            "path={},readonly=on,image_type=raw",
+            settings.config_disk_path(orb).display()
+        ),
+        "--net".into(),
+        format!("tap={},ip={host},mask={NETMASK}", slot.tap()),
+        "--balloon".into(),
+        "size=0,free_page_reporting=on".into(),
+        // Serial to stdout, which is the unit's journal.
+        "--serial".into(),
+        "tty".into(),
+        "--console".into(),
+        "off".into(),
     ]
 }
 
-/// Fails unless the network policy's table is loaded. The policy only
-/// forbids, so without its table an orb would reach the host and the LAN, and
-/// nothing else would notice.
-pub async fn ensure_network_policy() -> Result<()> {
-    run(NFT, &["list", "table", POLICY_FAMILY, POLICY_TABLE])
-        .await
-        .with_context(|| {
-            format!(
-                "the network policy table {POLICY_FAMILY} {POLICY_TABLE} is not loaded, \
-                 so an orb would not be confined to the internet"
-            )
-        })?;
+/// Ok only when the orb's VMM says its VM is running; otherwise, why not.
+pub async fn confirm_running(settings: &Settings, orb: &OrbId) -> Result<()> {
+    let socket = settings.api_socket_path(orb);
+    ensure!(socket.try_exists()?, "there is no API socket");
+
+    let ch_remote = settings.cloud_hypervisor.with_file_name("ch-remote");
+    let info = run(
+        &ch_remote.display().to_string(),
+        &[&format!("--api-socket={}", socket.display()), "info"],
+    )
+    .await?;
+    let info: serde_json::Value = serde_json::from_str(&info).context("reading vm.info")?;
+    ensure!(info["state"] == "Running", "the VM is {}", info["state"]);
     Ok(())
 }
 
-/// What the VMM behind the orb's socket says about it.
-pub async fn state(settings: &Settings, orb: &OrbId) -> Result<VmState> {
-    Ok(jorb_vmm::state(&api_socket_path(settings, orb)).await?)
-}
-
-/// Waits for the VMM to open its socket, then creates and boots the orb's VM
-/// in `slot`. Returns once the VMM reports it running.
-pub async fn boot(settings: &Settings, orb: &OrbId, slot: Slot) -> Result<()> {
-    let socket = api_socket_path(settings, orb);
-    wait_for_socket(&socket).await?;
-
-    let cmdline = cmdline(slot, orb);
-    let tap = slot.tap_name();
-    let root_disk = disk::disk_path(settings, orb);
-    let config_disk = disk::config_disk_path(settings, orb);
-
-    let shape = VmShape {
-        kernel: &settings.kernel,
-        cmdline: &cmdline,
-        cpus: settings.vcpus,
-        memory_mib: settings.memory_mib,
-        root_disk: &root_disk,
-        read_only_disk: &config_disk,
-        tap: Tap {
-            name: &tap,
-            host_address: slot.host_address(),
-            netmask: GUEST_NETMASK,
-        },
-    };
-
-    jorb_vmm::boot(&socket, &shape)
-        .await
-        .context("creating and booting the VM")
-}
-
-/// Waits until something accepts a connection on the socket. The file
-/// appears before the VMM listens on it, so a missing file and a refused
-/// connection both mean "not yet".
-async fn wait_for_socket(socket: &Path) -> Result<()> {
-    let deadline = Instant::now() + limits::API_SOCKET_WAIT;
-
-    while !accepts_connections(socket).await? {
-        ensure!(
-            Instant::now() < deadline,
-            "nothing listened on {} within {:?}",
-            socket.display(),
-            limits::API_SOCKET_WAIT
-        );
-        sleep(limits::API_SOCKET_POLL).await;
-    }
-
-    Ok(())
-}
-
-/// Bounded by the poll interval: a connect to a VMM whose backlog is full
-/// would otherwise block, and on this runtime nothing else could run.
-async fn accepts_connections(socket: &Path) -> Result<bool> {
-    let Ok(connected) = timeout(limits::API_SOCKET_POLL, UnixStream::connect(socket)).await else {
-        return Ok(false);
-    };
-    match connected {
-        Ok(_) => Ok(true),
-        Err(error)
-            if matches!(
-                error.kind(),
-                ErrorKind::NotFound | ErrorKind::ConnectionRefused
-            ) =>
-        {
-            Ok(false)
+pub async fn wait_until_running(settings: &Settings, orb: &OrbId) -> Result<()> {
+    let deadline = Instant::now() + limits::BOOT_WAIT;
+    loop {
+        match confirm_running(settings, orb).await {
+            Ok(()) => return Ok(()),
+            Err(error) if Instant::now() >= deadline => {
+                return Err(error.context(format!("not running after {:?}", limits::BOOT_WAIT)));
+            }
+            Err(_) => sleep(limits::BOOT_POLL).await,
         }
-        Err(error) => Err(error).with_context(|| format!("connecting to {}", socket.display())),
     }
+}
+
+/// The policy only drops, so without its table an orb would reach the host
+/// and the LAN and nothing else would notice.
+pub async fn ensure_network_policy() -> Result<()> {
+    let [family, name] = POLICY_TABLE;
+    run("nft", &["list", "table", family, name])
+        .await
+        .with_context(|| format!("the network policy table {family} {name} is not loaded"))?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn a_socket_counts_as_ready_only_once_something_listens() {
-        let directory = std::env::temp_dir().join("jorb-tests").join("socket");
-        std::fs::create_dir_all(&directory).unwrap();
-        let socket = directory.join("vmm.sock");
-        let _ = std::fs::remove_file(&socket);
-
-        assert!(!accepts_connections(&socket).await.unwrap(), "no file");
-
-        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        assert!(accepts_connections(&socket).await.unwrap(), "a listener");
-
-        drop(listener);
-        assert!(socket.exists());
-        assert!(
-            !accepts_connections(&socket).await.unwrap(),
-            "a file nobody listens on"
-        );
-    }
+    use crate::settings::test_settings;
 
     #[test]
-    fn a_slots_tap_and_addresses_follow_its_index() {
-        for (index, tap, host_address, guest) in [
-            (0, "jorb0", [10, 77, 0, 1], [10, 77, 0, 2]),
-            (255, "jorb255", [10, 77, 255, 1], [10, 77, 255, 2]),
-        ] {
-            let slot = Slot(index);
+    fn the_command_is_the_fixed_vm_shape() {
+        let settings = test_settings("/var/lib/jorb", "/run/jorb");
+        let command = command(&settings, &"amp-1".parse().unwrap(), Slot(7));
 
-            assert_eq!(slot.tap_name(), tap);
-            assert_eq!(slot.host_address(), Ipv4Addr::from(host_address));
-            assert_eq!(slot.guest_address(), Ipv4Addr::from(guest));
-        }
-    }
-
-    #[test]
-    fn the_cmdline_is_the_fixed_interface() {
         assert_eq!(
-            cmdline(Slot(0), &"amp-T-1a2b".parse().unwrap()),
-            "console=ttyAMA0 root=/dev/vda rw init=/jorb-init \
-             ip=10.77.0.2::10.77.0.1:255.255.255.252:amp-T-1a2b:eth0:off:1.1.1.1:9.9.9.9"
-        );
-    }
-
-    /// Slot 0's addresses are also what a hardcoded zero would produce.
-    #[test]
-    fn the_cmdline_follows_the_slot() {
-        assert!(
-            cmdline(Slot(7), &"amp-1".parse().unwrap())
-                .contains("ip=10.77.7.2::10.77.7.1:255.255.255.252:amp-1:eth0:")
+            command.join(" "),
+            "/bin/cloud-hypervisor --api-socket=/run/jorb/amp-1.sock \
+             --kernel /var/lib/jorb/kernel \
+             --cmdline console=ttyAMA0 root=/dev/vda rw init=/jorb-init \
+             ip=10.77.7.2::10.77.7.1:255.255.255.252:amp-1:eth0:off:1.1.1.1:9.9.9.9 \
+             --cpus boot=4 --memory size=6144M,thp=off \
+             --disk path=/var/lib/jorb/disks/amp-1.raw,image_type=raw \
+             path=/run/jorb/amp-1.cfg,readonly=on,image_type=raw \
+             --net tap=jorb7,ip=10.77.7.1,mask=255.255.255.252 \
+             --balloon size=0,free_page_reporting=on --serial tty --console off"
         );
     }
 }

@@ -1,61 +1,36 @@
-//! The bounds that keep jorb's loops and waits finite, and the sizes the
-//! design fixes. Each says why it has its value. Names, paths and programs
-//! live in the module that uses them.
+//! The bounds that keep jorb's loops and waits finite. Names, paths and
+//! programs live in the module that uses them.
 
-use std::num::{NonZeroU8, NonZeroU32};
 use std::time::Duration;
 
-/// The longest orb id. The real bound is the hostname it becomes, and a Linux
-/// hostname is 64 bytes.
+/// A Linux hostname is 64 bytes, and an orb id becomes one.
 pub const MAX_ORB_ID_LEN: usize = 64;
 
-/// How many slots a host may have. One slot is one `10.77.S.0/30`, and S is a
-/// byte of the address.
+/// Slot S is a byte of `10.77.S.0/30`.
 pub const MAX_SLOTS: u16 = 256;
 
-/// How many orb units recover will look at: one per slot is the real number,
-/// and this bounds the loop even if systemd lists something unexpected.
-pub const MAX_UNITS_TO_RECOVER: usize = MAX_SLOTS as usize;
+/// Recover looks at no more units than there can be slots.
+pub const MAX_UNITS: usize = MAX_SLOTS as usize;
 
-/// The v1 orb size, for a host that does not set `JORB_VCPUS` or
-/// `JORB_MEMORY_MIB`.
-pub const DEFAULT_VCPUS: NonZeroU8 = NonZeroU8::new(4).unwrap();
-pub const DEFAULT_MEMORY_MIB: NonZeroU32 = NonZeroU32::new(6144).unwrap();
-
-/// How long Amp allows one job before it gives up and retries.
+/// How long Amp allows one job before it retries it.
 pub const AMP_JOB_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// How long to wait for another job to let go of the lock, and how often to
-/// try. A healthy holder may run for the whole job deadline, so giving up
-/// here does not mean the holder is stuck: it means this job would not finish
-/// in time, and Amp should retry it later.
+/// The lock wait comes before the job deadline, and their sum must stay under
+/// Amp's timeout: a job still running when Amp retries is a second job against
+/// the same orb.
 pub const LOCK_WAIT: Duration = Duration::from_secs(50);
 pub const LOCK_POLL: Duration = Duration::from_millis(200);
-
-/// How long the job may take once it holds the lock.
 pub const JOB_DEADLINE: Duration = Duration::from_secs(230);
-
-// jorb has to fail before Amp gives up: a job still running when Amp retries
-// would be a second job against the same orb. The lock wait comes first and
-// the deadline after it, so their sum is the longest a job can run.
 const _: () = assert!(LOCK_WAIT.as_secs() + JOB_DEADLINE.as_secs() < AMP_JOB_TIMEOUT.as_secs());
 
-/// How long to wait for Cloud Hypervisor to open its API socket, and how often
-/// to look. It takes milliseconds on a host that is not thrashing; ten seconds
-/// survives a loaded one and leaves the job inside its deadline.
-pub const API_SOCKET_WAIT: Duration = Duration::from_secs(10);
-pub const API_SOCKET_POLL: Duration = Duration::from_millis(50);
+/// How long a started VM has to report itself running, and how often to ask.
+pub const BOOT_WAIT: Duration = Duration::from_secs(10);
+pub const BOOT_POLL: Duration = Duration::from_millis(100);
 
-/// What `systemd-run` allows a VM for a clean stop. A guest is switched off
-/// rather than shut down, so this is only the time systemd needs to kill the
-/// VMM and reap it.
+/// A guest is switched off, not shut down, so stopping is a kill and a reap.
 pub const UNIT_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How long to wait for a stopped unit to actually be gone, and how often to
-/// look. Stopping is a kill and a reap, so this is short.
-pub const UNIT_GONE_WAIT: Duration = Duration::from_secs(15);
-pub const UNIT_GONE_POLL: Duration = Duration::from_millis(100);
-
-/// How long any one subprocess may take. `systemctl` and `systemd-run` talk to
-/// a local bus; anything slower is a systemd that is not answering.
-pub const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+/// Any one subprocess. Longer than a stop that ends in a kill (twice
+/// `UNIT_STOP_TIMEOUT`); anything slower is a systemd or VMM not answering.
+pub const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(15);
+const _: () = assert!(2 * UNIT_STOP_TIMEOUT.as_secs() < SUBPROCESS_TIMEOUT.as_secs());
