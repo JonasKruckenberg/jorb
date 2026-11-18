@@ -18,14 +18,16 @@
 | T11 behaviour matrix | written, awaits a run as root |
 | T12 end to end | `[human]` |
 
-`nix flake check` passes from a clean checkout (verified by cloning the
-repository into a temporary directory and running it there). It covers
-formatting, clippy with the workspace's denied lints, the test suite (26 unit
-tests), evaluation of a host that enables the module, and `nft --check` over
-the network policy that host generates.
+The external review of `f95635c` (section at the end of this file) has been
+worked through: every finding was checked against the code and all held. All
+but N4 are done in code; N4 and every `[host]` acceptance check await a run on
+the host.
 
-What is left is everything that needs root on this machine, plus the owner's
-own steps. Nothing is blocked on a decision.
+`nix flake check` has not been run on Linux since that review. Earlier
+records of it passing are weaker than they read: until V3 the module check
+ran no NixOS assertions, and until N2 its `nft --check` read an empty file.
+The fmt, clippy and test checks pass in an aarch64 Linux container (31
+tests), and every check's derivation evaluates.
 
 ## What to run next
 
@@ -55,12 +57,27 @@ sudo nix run .#jorb-prepare-image
 sudo -E tests/host/jorb-init-in-guest.sh        # jorb-init in a real guest
 ```
 
-**The behaviour matrix**, all seven sections or one at a time. Sections 4 and 5 need things this host does not have yet: the module's nftables policy and NAT, and a zram device.
+**The behaviour matrix**, all ten sections or one at a time. Every section
+now needs the module installed, because jorb refuses to start an orb without
+the `inet jorb` table (N1). Section 10 deletes that table and restores it with
+`systemctl restart nftables.service`. The review asked for sections 1, 2, 3
+and 6 before and after its phase 3; neither run happened, so run them first.
 
 ```sh
 sudo -E tests/host/matrix.sh
 sudo -E tests/host/matrix.sh 4            # just the network policy, say
 ```
+
+**The review's other host checks**, after the module is switched in:
+
+```sh
+sudo -u jorb sudo -n FOO=1 "$(readlink -f /run/current-system/sw/bin/jorb-root 2>/dev/null || echo <jorb-root store path>)"  # C1: must be refused
+sudo -u jorb env ORB_OPERATION=pause ORB_ID=review-c2 <jorb-dispatch store path>                                       # C2: must exit 0
+```
+
+Then reboot a host with no base image and check the provider ends active
+with the image built (S3), record `systemd-analyze security` for a running
+orb unit before starting N4, and run one real Amp thread end to end (V2).
 
 **Once the module and T10 are on the host:**
 
