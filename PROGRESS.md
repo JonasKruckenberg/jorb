@@ -1408,3 +1408,20 @@ nothing on packets toward a tap.
   (`systemd-socket-activate --listen=0.0.0.0:47123 --accept cat`) and the
   stand-in tries a TCP connection to its tap's host address; connecting is
   `REACHED`. shellcheck clean. `[host]` awaiting a run.
+
+### N3. Host-wide side effects
+
+Confirmed: the module set `zramSwap.enable`, `net.ipv4.ip_forward` and
+`networking.nftables.enable` unconditionally. The owner chose (2026-11-18)
+`mkDefault` plus assertions.
+
+- All three are `mkDefault`, with a comment saying what each reaches beyond
+  jorb: forwarding routes between all of the host's interfaces, not only the
+  taps.
+- Assertions for the two jorb cannot work without: nftables enabled, and
+  `net.ipv4.ip_forward` set to 1. zram is not asserted; it only improves
+  where `MemoryHigh` reclaims to.
+- Evaluated: the check host builds its `toplevel.drvPath`. With
+  `ip_forward = 0` and `zramSwap.enable = false` it fails with "services.jorb
+  needs net.ipv4.ip_forward: orbs reach the internet through the host." With
+  only `zramSwap.enable = false` it evaluates.

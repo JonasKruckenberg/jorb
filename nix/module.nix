@@ -424,13 +424,28 @@ in
     })
 
     (mkIf cfg.enable {
-      # An orb that is throttled by MemoryHigh reclaims into zram rather than
-      # onto a disk, which is both faster and kinder to the SSD.
-      zramSwap.enable = true;
+      # Defaults, because each reaches beyond jorb: zram is host-wide swap,
+      # and forwarding routes between every interface the host has, not only
+      # the taps. The two jorb cannot work without are asserted below; zram is
+      # only a better place for MemoryHigh to reclaim into, so a host may turn
+      # it off.
+      zramSwap.enable = lib.mkDefault true;
+      boot.kernel.sysctl."net.ipv4.ip_forward" = lib.mkDefault 1;
+      networking.nftables.enable = lib.mkDefault true;
 
-      boot.kernel.sysctl."net.ipv4.ip_forward" = 1;
-
-      networking.nftables.enable = true;
+      assertions = [
+        {
+          assertion = config.networking.nftables.enable;
+          message = "services.jorb needs networking.nftables.enable: the network policy is an nftables table, and jorb refuses to start an orb without it.";
+        }
+        {
+          assertion = lib.elem (toString config.boot.kernel.sysctl."net.ipv4.ip_forward") [
+            "1"
+            "true"
+          ];
+          message = "services.jorb needs net.ipv4.ip_forward: orbs reach the internet through the host.";
+        }
+      ];
 
       # Orbs are internet-only. Everything the policy forbids is in one table:
       # nothing from an orb reaches the host, nothing reaches any address that
