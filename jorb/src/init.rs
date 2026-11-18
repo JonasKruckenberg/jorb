@@ -1,24 +1,25 @@
 //! Making a host ready to run orbs.
 //!
 //! Preflight asks; init changes the host and then asks, so what it leaves
-//! behind is described by the same checks. Every step is idempotent, and a
-//! host that is already ready comes out unchanged.
+//! behind is described by the same questions. Each step below creates
+//! something and says so, and each is idempotent: a host that is already
+//! ready comes out unchanged.
 //!
 //! Creating a filesystem is the one step that waits to be asked for, because
-//! mounting something outlives the command. The Nix module passes
+//! mounting something outlives the command that did it. The Nix module passes
 //! `--create-state-image`, so a NixOS host still needs no attention.
 #![allow(
     clippy::print_stdout,
-    reason = "telling whoever ran it what changed is this module's output"
+    reason = "saying what changed is this module's output"
 )]
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
-use crate::fixed;
-use crate::host::{self, Host};
-use crate::preflight::{self, Privileges};
+use crate::constants;
+use crate::host::{self, HostConfig};
+use crate::preflight;
 
 /// The filesystem init may create, when it was asked for one.
 #[derive(Debug)]
@@ -29,18 +30,14 @@ pub struct StateImage {
 
 /// Makes the host ready, then reports on it. `Ok(false)` means it is still
 /// not ready and preflight has said why.
-pub async fn init(host: &Host, image: Option<&StateImage>) -> Result<bool> {
-    let privileges = Privileges::current().await;
-    if !matches!(privileges, Privileges::Root) {
-        bail!(
-            "jorb init creates directories, filesystems and the base image, so it has to be root: {}",
-            privileges.advice()
-        );
-    }
+pub async fn init(host: &HostConfig, image: Option<&StateImage>) -> Result<bool> {
+    preflight::root()
+        .await
+        .context("jorb init creates directories, filesystems and the base image")?;
 
-    directories(host)?;
-    state_filesystem(host, image).await?;
-    base_image(host).await?;
+    create_directories(host)?;
+    create_state_filesystem(host, image).await?;
+    build_base_image(host).await?;
 
     println!("--");
     preflight::preflight(host).await
@@ -48,7 +45,7 @@ pub async fn init(host: &Host, image: Option<&StateImage>) -> Result<bool> {
 
 /// The directories every job expects. Mode 0700 because a config disk under
 /// the run directory holds a token.
-fn directories(host: &Host) -> Result<()> {
+fn create_directories(host: &HostConfig) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     for directory in [
@@ -60,7 +57,7 @@ fn directories(host: &Host) -> Result<()> {
             .with_context(|| format!("creating {}", directory.display()))?;
         std::fs::set_permissions(
             &directory,
-            std::fs::Permissions::from_mode(fixed::STATE_DIRECTORY_MODE),
+            std::fs::Permissions::from_mode(constants::STATE_DIRECTORY_MODE),
         )
         .with_context(|| format!("setting the mode of {}", directory.display()))?;
         println!("ok   {}", directory.display());
@@ -75,7 +72,7 @@ fn directories(host: &Host) -> Result<()> {
 /// The image is sparse, so it costs what the orbs write rather than its size.
 /// The mount lasts until the host reboots; keeping it is the Nix module's job
 /// on NixOS and an fstab line elsewhere, so this prints that line.
-async fn state_filesystem(host: &Host, image: Option<&StateImage>) -> Result<()> {
+async fn create_state_filesystem(host: &HostConfig, image: Option<&StateImage>) -> Result<()> {
     let directory = host.state_directory();
 
     if preflight::can_clone(host) {
@@ -96,11 +93,11 @@ async fn state_filesystem(host: &Host, image: Option<&StateImage>) -> Result<()>
     if image.path.try_exists()? {
         println!("ok   {} is there", image.path.display());
     } else {
-        make_image(image).await?;
+        create_image(image).await?;
     }
 
     host::run(
-        fixed::MOUNT,
+        constants::MOUNT,
         &[
             "-o",
             "loop",
@@ -119,33 +116,33 @@ async fn state_filesystem(host: &Host, image: Option<&StateImage>) -> Result<()>
 
     println!(
         "ok   mounted on {}, until this host reboots. To keep it: the module's \
-         state.image option, or in fstab: {} {} xfs loop 0 0",
+         stateImage option, or in fstab: {} {} xfs loop 0 0",
         directory.display(),
         image.path.display(),
         directory.display()
     );
 
     // The mount hid the directories made above.
-    directories(host)
+    create_directories(host)
 }
 
 /// A sparse file with XFS on it. `mkfs.xfs` is the only way to make one, so
 /// this is one of the two programs init runs.
-async fn make_image(image: &StateImage) -> Result<()> {
+async fn create_image(image: &StateImage) -> Result<()> {
     let file = std::fs::File::create(&image.path)
         .with_context(|| format!("creating {}", image.path.display()))?;
-    file.set_len(u64::from(image.gib) * fixed::BYTES_PER_GIB)
+    file.set_len(u64::from(image.gib) * constants::BYTES_PER_GIB)
         .with_context(|| format!("sizing {}", image.path.display()))?;
     drop(file);
 
     host::run(
-        fixed::MKFS_XFS,
+        constants::MKFS_XFS,
         &[
             "-q",
             "-m",
             "reflink=1",
             "-L",
-            fixed::STATE_LABEL,
+            constants::STATE_LABEL,
             &image.path.to_string_lossy(),
         ],
     )
@@ -159,7 +156,7 @@ async fn make_image(image: &StateImage) -> Result<()> {
 
 /// Builds the base image if it is missing, by name, so the PATH decides which
 /// one as it does for the VMM.
-async fn base_image(host: &Host) -> Result<()> {
+async fn build_base_image(host: &HostConfig) -> Result<()> {
     let image = host.base_image();
     if image.try_exists()? {
         println!("ok   {} is there", image.display());
@@ -170,9 +167,9 @@ async fn base_image(host: &Host) -> Result<()> {
         "--   building {}, which pulls the Amp orb image",
         image.display()
     );
-    host::run(fixed::PREPARE_IMAGE, &[])
+    host::run(constants::PREPARE_IMAGE, &[])
         .await
-        .with_context(|| format!("running {}", fixed::PREPARE_IMAGE))?;
+        .with_context(|| format!("running {}", constants::PREPARE_IMAGE))?;
 
     Ok(())
 }

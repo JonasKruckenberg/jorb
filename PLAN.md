@@ -26,7 +26,7 @@ Each is resolved by a gate in T3. Until then, code that depends on one carries `
 ## Milestone 1: foundations
 
 ### T0. Repository skeleton
-- **Deliver:** `flake.nix` (dev shell with Rust toolchain, `cloud-hypervisor`, and `CH_OPENAPI_SPEC` pointing into that package's source); Cargo workspace with `jorb-vmm`, `jorb`, `jorb-init`; `[workspace.lints]` (`unsafe_code = "forbid"`; clippy `all`, `unwrap_used`, `expect_used`, `panic`, `todo`, `dbg_macro`, `print_stdout`, `print_stderr` denied, with unwrap allowed in tests); a `fixed.rs` at the root of `jorb` and `jorb-init` for the values the design pins down; `PROGRESS.md` with sections Status, Gate results, Open questions, Proposals. If the toolchain's clippy has an `infinite_loop` lint, deny it too (check; do not assume).
+- **Deliver:** `flake.nix` (dev shell with Rust toolchain, `cloud-hypervisor`, and `CH_OPENAPI_SPEC` pointing into that package's source); Cargo workspace with `jorb-vmm`, `jorb`, `jorb-init`; `[workspace.lints]` (`unsafe_code = "forbid"`; clippy `all`, `unwrap_used`, `expect_used`, `panic`, `todo`, `dbg_macro`, `print_stdout`, `print_stderr` denied, with unwrap allowed in tests); a `constants.rs` at the root of `jorb` and `jorb-init`; `PROGRESS.md` with sections Status, Gate results, Open questions, Proposals. If the toolchain's clippy has an `infinite_loop` lint, deny it too (check; do not assume).
 - **Accept:** `nix flake check` passes with empty crates.
 
 ### T1. Guest kernel
@@ -96,7 +96,7 @@ let running = jorb_vmm::state(&socket).await? == VmState::Running;
   - `remove_disk`: unlink if present; remove the config file.
   - `start`: remove any stale socket; write the config disk; pick the lowest free slot; `systemd-run --collect --unit jorb-orb-<id> --slice jorb.slice -p Type=exec -p TimeoutStopSec=5 -p OOMScoreAdjust=500` running Cloud Hypervisor with the API socket; wait up to `API_SOCKET_WAIT` for the socket; `VmBuilder::boot`; postcondition `state == Running`. On failure, return the error and clean nothing up; the next job's `recover` removes the debris.
   - Operations as the compositions in `AGENTS.md`; `main` takes the lock, opens the root span, runs `recover` then the operation under `JOB_DEADLINE`, maps the result to the exit code.
-  - `fixed.rs` holding every size, count, duration and fixed name used above (the `5` in the `systemd-run` line is `UNIT_STOP_TIMEOUT`); each subprocess runs under a timeout.
+  - `constants.rs` holding every size, count, duration and fixed name used above (the `5` in the `systemd-run` line is `UNIT_STOP_TIMEOUT`); each subprocess runs under a timeout.
 - **Logging:** root span `job` with `op` and `orb`; one `#[instrument]` span per primitive (skip secrets); a final event with `outcome`, `state_before`, `state_after`.
 - **Accept:** clippy and tests pass; a test proves the token never appears in `Debug` or log output of `Request`; behaviour is verified in T11.
 

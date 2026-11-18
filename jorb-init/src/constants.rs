@@ -1,4 +1,4 @@
-//! Every value the guest side fixes: what it reads, who it runs as, and the
+//! Every constant the guest side uses: what it reads, who it runs as, and the
 //! two bounds it imposes. Each carries the reason for its value.
 
 use std::ffi::CStr;

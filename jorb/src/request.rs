@@ -12,7 +12,7 @@ use anyhow::{Context, Result, ensure};
 use clap::{Args, ValueEnum};
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::fixed;
+use crate::constants;
 
 /// What Amp asked for: an operation, the orb to apply it to, and on spawn the
 /// credential that orb will connect with.
@@ -66,9 +66,9 @@ impl FromStr for OrbId {
             "an orb id must start with a letter or a digit, and {first:?} does not"
         );
         ensure!(
-            raw.len() <= fixed::MAX_ORB_ID_LEN,
+            raw.len() <= constants::MAX_ORB_ID_LEN,
             "an orb id cannot be longer than {} characters, and this one is {}",
-            fixed::MAX_ORB_ID_LEN,
+            constants::MAX_ORB_ID_LEN,
             raw.len()
         );
 
@@ -121,14 +121,14 @@ impl ConfigDisk {
         }
 
         ensure!(
-            contents.len() <= fixed::CONFIG_DISK_BYTES,
+            contents.len() <= constants::CONFIG_DISK_BYTES,
             "the config disk needs {} bytes, which is more than the {} it has",
             contents.len(),
-            fixed::CONFIG_DISK_BYTES
+            constants::CONFIG_DISK_BYTES
         );
 
         let mut disk = contents.into_bytes();
-        disk.resize(fixed::CONFIG_DISK_BYTES, 0);
+        disk.resize(constants::CONFIG_DISK_BYTES, 0);
 
         Ok(Self(disk))
     }
@@ -181,7 +181,7 @@ mod tests {
             "amp-T-1a2b3c4d",
             "a",
             "orb_1",
-            &"a".repeat(fixed::MAX_ORB_ID_LEN),
+            &"a".repeat(constants::MAX_ORB_ID_LEN),
         ] {
             assert_eq!(
                 raw.parse::<OrbId>().expect("this id is valid").to_string(),
@@ -197,7 +197,7 @@ mod tests {
         for (raw, reason) in [
             ("", "cannot be empty"),
             (
-                &"a".repeat(fixed::MAX_ORB_ID_LEN + 1),
+                &"a".repeat(constants::MAX_ORB_ID_LEN + 1),
                 "longer than 64 characters",
             ),
             ("-rf", "must start with"),
@@ -262,7 +262,7 @@ mod tests {
     fn a_config_disk_is_its_lines_padded_to_a_fixed_size() {
         let disk = config_disk("a-token", None).expect("the config disk is representable");
 
-        assert_eq!(disk.as_bytes().len(), fixed::CONFIG_DISK_BYTES);
+        assert_eq!(disk.as_bytes().len(), constants::CONFIG_DISK_BYTES);
         assert_eq!(&disk.as_bytes()[..18], b"ORB_TOKEN=a-token\n");
         assert!(disk.as_bytes()[18..].iter().all(|byte| *byte == 0));
     }
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn a_config_that_does_not_fit_is_refused() {
-        let refusal = config_disk(&"a".repeat(fixed::CONFIG_DISK_BYTES), None)
+        let refusal = config_disk(&"a".repeat(constants::CONFIG_DISK_BYTES), None)
             .expect_err("a config that does not fit is refused")
             .to_string();
 

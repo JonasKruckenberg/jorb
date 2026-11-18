@@ -469,6 +469,46 @@ the obvious form would have rejected the obvious configuration. It compares
 against `"${stateDirectory}/"`, and the module check now evaluates a host with
 `stateImage = "/var/lib/jorb.img"` so that stays true.
 
+## Naming and shape, on the owner's reading, 2026-11-18
+
+- **`fixed.rs` is `constants.rs`.** It holds constants. The previous name was
+  mine, twice over: `limits.rs` held things that bounded nothing, and `fixed`
+  was no better.
+- **`Host` is `HostConfig`**, and it no longer allocates anything. It is this
+  machine's description: sizing, and where the files live. `lowest_free_slot`
+  moved to `Slot::lowest_free(host)`, next to `Slot::is_free` and
+  `Slot::all(host)`, which is where slot allocation belongs. `Slot::all` also
+  removed the slot-iterating loop that had been written twice.
+- **Names that said nothing** now say what they do to what: `converge` is
+  `run_job`, `take_lock` is `take_host_lock`, `recover` is `stop_dead_orbs`.
+  The last one is `recover` in AGENTS.md's model and its doc comment says so,
+  so the vocabulary survives where the call site reads plainly.
+- **The modules say how the pieces fit**, so no comment has to. `request.rs`
+  is what Amp asked for, `host.rs` is this machine and its slots, `systemd.rs`
+  owns an orb unit's lifetime, `orb.rs` composes those into the four
+  primitives, and `preflight.rs` and `init.rs` are what an installer runs. The
+  unit naming, the `systemd-run` invocation and the stop-and-wait left `orb.rs`
+  and `host.rs` for `systemd.rs`, which is the only module that knows systemd
+  exists.
+- **init's functions are verbs**: `create_directories`,
+  `create_state_filesystem`, `create_image`, `build_base_image`, and then
+  preflight, so creating and asserting are told apart by the names.
+- **init's root check is `preflight::root()`**, which returns the evidence or
+  the error that says how to become root, used by `?` with context rather than
+  by `matches!` and `bail!`. One question, two callers.
+- **preflight has no reporting type.** Every question returns
+  `Result<String>`: the evidence, or the error that is the answer. That
+  deleted `Check`, `passed`, `failed`, a hand-formatted message per failure,
+  and a `writeln!` into a `String` that had needed a banned `expect`. `ensure!`
+  and `with_context` do the work now.
+
+Argued and kept: **`ConfigDisk`**. AGENTS.md's Fixed interfaces defines "config
+disk" and tells us to use the project's vocabulary rather than coin synonyms;
+jorb-init calls it that from the guest side; and it is literally a disk
+carrying configuration. `GuestConfig` hides that it is a block device and
+`TokenDisk` is narrower than its contents. Renaming it is a Fixed interfaces
+change, so it waits on the owner.
+
 ## Open questions
 
 1. `AGENTS.md` describes the host as having 8 GiB of memory; this machine
@@ -802,7 +842,7 @@ Files renamed, because the names had stopped describing the contents:
 
 - `job.rs` is `request.rs`. Renaming the type to `Request` and leaving the
   module called `job` was half a job.
-- `limits.rs` is `fixed.rs` in `jorb` and `jorb-init`. It had drifted into
+- `limits.rs` is `constants.rs` in `jorb` and `jorb-init`. It had drifted into
   holding everything constant, and `SYSTEMCTL`, `GUEST_HOME` and `STATE_DIR`
   bound nothing. The name now covers what is actually in there: the bounds
   plus the names, paths, devices and addresses the interface pins down.

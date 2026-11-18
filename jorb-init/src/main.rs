@@ -11,7 +11,7 @@
 //! truthful state for the host to see. There is no shutdown path: pause is a
 //! power cut, and ext4 replays its journal on the next boot.
 
-mod fixed;
+mod constants;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -47,8 +47,8 @@ fn start_bootstrap() -> Result<u32> {
     write_resolv_conf()?;
 
     let environment = environment(
-        Path::new(fixed::ENV_FILE),
-        Path::new(fixed::CONFIG_DISK_DEVICE),
+        Path::new(constants::ENV_FILE),
+        Path::new(constants::CONFIG_DISK_DEVICE),
     )?;
 
     spawn_bootstrap(&environment)
@@ -61,7 +61,12 @@ fn mount_filesystems() -> Result<()> {
         ("proc", "/proc", "proc", None),
         ("sysfs", "/sys", "sysfs", None),
         ("devpts", "/dev/pts", "devpts", None),
-        ("tmpfs", "/dev/shm", "tmpfs", Some(fixed::DEV_SHM_OPTIONS)),
+        (
+            "tmpfs",
+            "/dev/shm",
+            "tmpfs",
+            Some(constants::DEV_SHM_OPTIONS),
+        ),
         ("tmpfs", "/run", "tmpfs", None),
     ] {
         fs::create_dir_all(target).with_context(|| format!("creating {target}"))?;
@@ -86,7 +91,7 @@ fn shorten_the_writeback_window() -> Result<()> {
         "/proc/sys/vm/dirty_expire_centisecs",
         "/proc/sys/vm/dirty_writeback_centisecs",
     ] {
-        fs::write(knob, fixed::DIRTY_WRITEBACK_CENTISECS.to_string())
+        fs::write(knob, constants::DIRTY_WRITEBACK_CENTISECS.to_string())
             .with_context(|| format!("writing {knob}"))?;
     }
 
@@ -112,8 +117,8 @@ fn environment(env_file: &Path, config_disk: &Path) -> Result<BTreeMap<String, S
         fs::read_to_string(env_file).with_context(|| format!("reading {}", env_file.display()))?;
     let mut environment = parse_env_file(&image);
 
-    environment.insert("HOME".to_owned(), fixed::GUEST_HOME.to_owned());
-    environment.insert("USER".to_owned(), fixed::GUEST_USER.to_owned());
+    environment.insert("HOME".to_owned(), constants::GUEST_HOME.to_owned());
+    environment.insert("USER".to_owned(), constants::GUEST_USER.to_owned());
 
     let disk =
         fs::read(config_disk).with_context(|| format!("reading {}", config_disk.display()))?;
@@ -148,9 +153,9 @@ fn parse_env_file(contents: &str) -> BTreeMap<String, String> {
 fn parse_config_disk(disk: &[u8]) -> Result<BTreeMap<String, String>> {
     let end = disk
         .iter()
-        .take(fixed::CONFIG_DISK_BYTES)
+        .take(constants::CONFIG_DISK_BYTES)
         .position(|byte| *byte == 0)
-        .unwrap_or(disk.len().min(fixed::CONFIG_DISK_BYTES));
+        .unwrap_or(disk.len().min(constants::CONFIG_DISK_BYTES));
 
     let contents = std::str::from_utf8(&disk[..end]).context("the config disk is not UTF-8")?;
 
@@ -162,25 +167,25 @@ fn parse_config_disk(disk: &[u8]) -> Result<BTreeMap<String, String>> {
 /// The child keeps running after this returns: it is the guest's whole
 /// purpose, and PID 1 only reaps from here on.
 fn spawn_bootstrap(environment: &BTreeMap<String, String>) -> Result<u32> {
-    let child = Command::new(fixed::SETPRIV)
+    let child = Command::new(constants::SETPRIV)
         .args([
-            &format!("--reuid={}", fixed::GUEST_USER),
-            &format!("--regid={}", fixed::GUEST_USER),
+            &format!("--reuid={}", constants::GUEST_USER),
+            &format!("--regid={}", constants::GUEST_USER),
             "--init-groups",
             "--",
-            fixed::AMP,
+            constants::AMP,
             "orb",
             "bootstrap",
         ])
-        .current_dir(fixed::GUEST_HOME)
+        .current_dir(constants::GUEST_HOME)
         .env_clear()
         .envs(environment)
         .spawn()
-        .with_context(|| format!("spawning {} through {}", fixed::AMP, fixed::SETPRIV))?;
+        .with_context(|| format!("spawning {} through {}", constants::AMP, constants::SETPRIV))?;
 
     info!(
         pid = child.id(),
-        user = fixed::GUEST_USER,
+        user = constants::GUEST_USER,
         "bootstrap started"
     );
 
@@ -250,7 +255,7 @@ mod tests {
     /// A config disk as jorb writes it: lines, then NUL padding to the block.
     fn config_disk(contents: &str) -> Vec<u8> {
         let mut disk = contents.as_bytes().to_vec();
-        disk.resize(fixed::CONFIG_DISK_BYTES, 0);
+        disk.resize(constants::CONFIG_DISK_BYTES, 0);
         disk
     }
 

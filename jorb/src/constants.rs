@@ -1,5 +1,5 @@
-//! Every value the design fixes: the bounds that keep loops and waits finite,
-//! and the names, paths, devices and addresses the interface pins down. Each
+//! Every constant jorb uses: the bounds that keep loops and waits finite, and
+//! the names, paths, devices and addresses the interface pins down. Each
 //! carries the reason for its value, and nothing elsewhere in the crate writes
 //! a bare literal for any of them.
 

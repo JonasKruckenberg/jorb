@@ -1,20 +1,18 @@
 //! One Amp orb job: read the environment, take the lock, converge, report.
 //!
-//! The story is in that order and so is this file. An invocation is Amp's
-//! request plus the host it runs on, parsed once; one lock covers the whole
-//! job, so no two jobs interleave; recover clears whatever a killed job left
-//! behind; and the operation is a target state built from the four primitives
-//! on `Orb`.
+//! The story is in that order and so is this file. `run_job` below is the
+//! whole of it.
 //!
 //! jorb is crash-only. The start path is the recovery path, nothing is cleaned
 //! up on the way out, and no error branch below tidies anything.
 
-mod fixed;
+mod constants;
 mod host;
 mod init;
 mod orb;
 mod preflight;
 mod request;
+mod systemd;
 
 use std::fs::{File, OpenOptions};
 use std::path::Path;
@@ -27,7 +25,7 @@ use jorb_vmm::VmState;
 use tokio::time::{sleep, timeout};
 use tracing::{Level, debug, error, info, info_span, instrument};
 
-use crate::host::Host;
+use crate::host::HostConfig;
 use crate::orb::Orb;
 use crate::request::{ConfigDisk, Operation, Request};
 
@@ -44,7 +42,7 @@ struct Invocation {
     request: Request,
 
     #[command(flatten)]
-    host: Host,
+    host: HostConfig,
 }
 
 /// `jorb preflight`. Everything it needs comes from `JORB_*`, so it takes no
@@ -56,7 +54,7 @@ struct Invocation {
 )]
 struct PreflightCommand {
     #[command(flatten)]
-    host: Host,
+    host: HostConfig,
 }
 
 /// `jorb init`.
@@ -70,15 +68,15 @@ struct InitCommand {
     create_state_image: bool,
 
     /// Where that image goes.
-    #[arg(long, default_value = fixed::STATE_IMAGE)]
+    #[arg(long, default_value = constants::STATE_IMAGE)]
     state_image: std::path::PathBuf,
 
     /// How big it claims to be. It is sparse, so this is not what it costs.
-    #[arg(long, default_value_t = fixed::STATE_IMAGE_GIB)]
+    #[arg(long, default_value_t = constants::STATE_IMAGE_GIB)]
     state_image_gib: u32,
 
     #[command(flatten)]
-    host: Host,
+    host: HostConfig,
 }
 
 /// Exit 0 means the operation's postcondition was observed. Anything else
@@ -129,7 +127,7 @@ async fn main() -> ExitCode {
     let _entered = span.enter();
 
     let started = Instant::now();
-    match converge(&invocation).await {
+    match run_job(&invocation).await {
         Ok(states) => {
             info!(
                 outcome = "ok",
@@ -219,12 +217,13 @@ struct Transition {
     after: VmState,
 }
 
-/// Holds the lock for the whole job, then runs recover and the operation
-/// inside the deadline.
+/// One job, start to finish: take the host's lock, clear what a dead job left
+/// behind, drive this orb to the operation's target state, and report what
+/// changed.
 ///
 /// The deadline sits below Amp's five minutes: a job still running when Amp
 /// gives up would become a second job against the same orb.
-async fn converge(invocation: &Invocation) -> Result<Transition> {
+async fn run_job(invocation: &Invocation) -> Result<Transition> {
     let host = &invocation.host;
     let request = &invocation.request;
     let orb = Orb::new(host, &request.orb);
@@ -234,10 +233,10 @@ async fn converge(invocation: &Invocation) -> Result<Transition> {
             .with_context(|| format!("creating {}", directory.display()))?;
     }
 
-    let _lock = take_lock(&host.lock()).await?;
+    let _lock = take_host_lock(&host.lock()).await?;
 
-    timeout(fixed::JOB_DEADLINE, async {
-        recover(host).await?;
+    timeout(constants::JOB_DEADLINE, async {
+        stop_dead_orbs(host).await?;
 
         // Recover has just stopped every unit whose VM was not running, so
         // under the lock this is either Running or Absent.
@@ -257,15 +256,21 @@ async fn converge(invocation: &Invocation) -> Result<Transition> {
         Ok(Transition { before, after })
     })
     .await
-    .with_context(|| format!("the job did not finish within {:?}", fixed::JOB_DEADLINE))?
+    .with_context(|| {
+        format!(
+            "the job did not finish within {:?}",
+            constants::JOB_DEADLINE
+        )
+    })?
 }
 
-/// The one lock, held for the whole job, so no two jobs interleave.
+/// The host's one lock, held for the whole job, so no two jobs on this host
+/// interleave.
 ///
 /// The wait is bounded. Every holder has the same job deadline, so a lock held
 /// for longer belongs to a stuck job, and failing here lets Amp retry instead
 /// of piling jobs up behind it.
-async fn take_lock(path: &Path) -> Result<File> {
+async fn take_host_lock(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .create(true)
         .read(true)
@@ -274,7 +279,7 @@ async fn take_lock(path: &Path) -> Result<File> {
         .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
 
-    let deadline = Instant::now() + fixed::LOCK_WAIT;
+    let deadline = Instant::now() + constants::LOCK_WAIT;
     loop {
         match file.try_lock() {
             Ok(()) => return Ok(file),
@@ -283,10 +288,10 @@ async fn take_lock(path: &Path) -> Result<File> {
                     Instant::now() < deadline,
                     "another job held {} for longer than {:?}",
                     path.display(),
-                    fixed::LOCK_WAIT
+                    constants::LOCK_WAIT
                 );
                 debug!("waiting for the lock");
-                sleep(fixed::LOCK_POLL).await;
+                sleep(constants::LOCK_POLL).await;
             }
             Err(std::fs::TryLockError::Error(error)) => {
                 return Err(error).with_context(|| format!("locking {}", path.display()));
@@ -296,16 +301,17 @@ async fn take_lock(path: &Path) -> Result<File> {
 }
 
 /// Stops every orb unit whose VM is not running, whichever orb it belongs to.
+/// This is `recover` in AGENTS.md's model, and every job begins with it.
 ///
 /// Under the lock no job is mid-start, so such a unit is debris from a job that
 /// died, and stopping it frees the slot its half-started VM was holding.
 #[instrument(skip_all)]
-async fn recover(host: &Host) -> Result<()> {
-    let units = host::orb_units().await?;
+async fn stop_dead_orbs(host: &HostConfig) -> Result<()> {
+    let units = systemd::orb_units().await?;
     debug!(count = units.len(), "orb units");
 
     for unit in units {
-        let Some(id) = host::orb_of_unit(&unit) else {
+        let Some(id) = systemd::orb_of_unit(&unit) else {
             info!(unit = %unit, "a unit that is not named after an orb; leaving it alone");
             continue;
         };

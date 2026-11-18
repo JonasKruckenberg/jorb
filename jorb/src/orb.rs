@@ -19,20 +19,21 @@ use jorb_vmm::{VmBuilder, VmState, Vmm};
 use tokio::time::sleep;
 use tracing::{debug, info, instrument};
 
-use crate::fixed;
-use crate::host::{self, Host};
+use crate::constants;
+use crate::host::{HostConfig, Slot};
 use crate::request::{ConfigDisk, OrbId};
+use crate::systemd;
 
 /// One orb on one host. Cheap to make: it is a pair of borrows, and holding
 /// one says nothing about whether the orb exists.
 #[derive(Debug, Clone, Copy)]
 pub struct Orb<'a> {
-    host: &'a Host,
+    host: &'a HostConfig,
     id: &'a OrbId,
 }
 
 impl<'a> Orb<'a> {
-    pub fn new(host: &'a Host, id: &'a OrbId) -> Self {
+    pub fn new(host: &'a HostConfig, id: &'a OrbId) -> Self {
         Self { host, id }
     }
 
@@ -56,27 +57,9 @@ impl<'a> Orb<'a> {
     }
 
     /// Stops the orb's unit and takes its socket away.
-    ///
-    /// The postcondition is systemd's own answer, not the exit code of the
-    /// stop. A unit that was already gone and a unit that had to be killed
-    /// look the same from here, so repeating this is safe.
     #[instrument(skip_all, fields(orb = %self.id))]
     pub async fn stop(&self) -> Result<()> {
-        let unit = host::unit_name(self.id);
-
-        // --no-block would leave the postcondition to a race; this waits.
-        let _ = host::run(fixed::SYSTEMCTL, &["--no-ask-password", "stop", &unit]).await;
-
-        let deadline = Instant::now() + fixed::UNIT_GONE_WAIT;
-        while host::unit_is_active(&unit).await? {
-            ensure!(
-                Instant::now() < deadline,
-                "{unit} was still active {:?} after being stopped",
-                fixed::UNIT_GONE_WAIT
-            );
-            sleep(fixed::UNIT_GONE_POLL).await;
-        }
-
+        systemd::stop_orb_unit(self.id).await?;
         remove_if_present(&self.host.api_socket(self.id))?;
 
         Ok(())
@@ -171,31 +154,11 @@ impl<'a> Orb<'a> {
         remove_if_present(&socket)?;
         write_config_disk(&config_disk_path, config_disk)?;
 
-        let slot = self.host.lowest_free_slot()?;
-        let unit = host::unit_name(self.id);
+        let slot = Slot::lowest_free(self.host)?;
         tracing::Span::current().record("slot", slot.index());
-        info!(slot = slot.index(), unit = %unit, "starting");
 
-        host::run(
-            fixed::SYSTEMD_RUN,
-            &[
-                "--no-ask-password",
-                "--collect",
-                &format!("--unit={unit}"),
-                &format!("--slice={}", fixed::SLICE),
-                "--property=Type=exec",
-                "--property=OOMScoreAdjust=500",
-                &format!(
-                    "--property=TimeoutStopSec={}",
-                    fixed::UNIT_STOP_TIMEOUT.as_secs()
-                ),
-                "--",
-                &self.host.cloud_hypervisor.to_string_lossy(),
-                &format!("--api-socket={}", socket.display()),
-            ],
-        )
-        .await
-        .with_context(|| format!("starting {unit}"))?;
+        let unit = systemd::start_orb_unit(self.host, self.id, &socket).await?;
+        info!(slot = slot.index(), unit = %unit, "starting");
 
         wait_for_socket(&socket).await?;
 
@@ -211,7 +174,11 @@ impl<'a> Orb<'a> {
         .without_huge_pages()
         .disk(&self.host.disk(self.id))
         .read_only_disk(&config_disk_path)
-        .tap(&slot.tap_name(), slot.host_address(), fixed::GUEST_NETMASK)
+        .tap(
+            &slot.tap_name(),
+            slot.host_address(),
+            constants::GUEST_NETMASK,
+        )
         .free_page_reporting()
         .boot(&Vmm::at(&socket)?)
         .await
@@ -247,16 +214,16 @@ fn write_config_disk(path: &Path, config_disk: &ConfigDisk) -> Result<()> {
 
 /// Waits for Cloud Hypervisor to open its API socket.
 async fn wait_for_socket(socket: &Path) -> Result<()> {
-    let deadline = Instant::now() + fixed::API_SOCKET_WAIT;
+    let deadline = Instant::now() + constants::API_SOCKET_WAIT;
 
     while !socket.exists() {
         ensure!(
             Instant::now() < deadline,
             "{} did not appear within {:?}",
             socket.display(),
-            fixed::API_SOCKET_WAIT
+            constants::API_SOCKET_WAIT
         );
-        sleep(fixed::API_SOCKET_POLL).await;
+        sleep(constants::API_SOCKET_POLL).await;
     }
 
     Ok(())
@@ -281,12 +248,12 @@ mod tests {
     #[derive(Parser)]
     struct Only {
         #[command(flatten)]
-        host: Host,
+        host: HostConfig,
     }
 
     /// A host whose directories are this test's own, so nothing it writes
     /// lands in /var/lib/jorb or /run/jorb.
-    fn test_host(name: &str) -> Host {
+    fn test_host(name: &str) -> HostConfig {
         let directory = std::env::temp_dir().join("jorb-tests").join(name);
         std::fs::create_dir_all(&directory).unwrap();
 
