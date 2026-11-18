@@ -468,6 +468,10 @@ the obvious form would have rejected the obvious configuration. It compares
 against `"${stateDirectory}/"`, and the module check now evaluates a host with
 `stateImage = "/var/lib/jorb.img"` so that stays true.
 
+(Correction, D1: the code committed with this paragraph, in `a568a8c`, read
+`!lib.hasPrefix "/" cfg.stateImage`, which rejects every absolute path. S3
+fixed it. See D1 below for why the check did not catch it.)
+
 ## Naming and shape, on the owner's reading, 2026-11-18
 
 - **`fixed.rs` is `constants.rs`.** It holds constants. The previous name was
@@ -811,6 +815,10 @@ What came out, and why each was not pulling its weight:
   `state(socket) -> Result<VmState>`, where an API socket is the only name for
   a VM and `Absent` is the single answer for a socket that is gone, dead or
   has no VM. One request per observation instead of two.
+
+  (Correction, D1: by `a568a8c` the crate had a `Vmm` handle again, and
+  `boot` returned a `Vm` borrowing it, so this paragraph described an API
+  the code did not have. R7 restored what it describes.)
 - **`Paths`.** Six fields of which three were host-wide, not per-orb, so the
   same lock and base image arrived under an orb's name, and `disks_directory`
   carried an `unwrap_or` for a case that cannot happen. `Settings` already
@@ -1468,3 +1476,22 @@ did the narrowing after the scrape.
   is unverified.
 - The module check's `drvPath` evaluates. `[host]` whether the orbs' series
   still appear, and nothing else does, is part of G7 and awaits a run.
+
+### D1. Two statements in PROGRESS.md the code contradicted
+
+Confirmed both. `git log -S` puts each in `a568a8c` ("wip"), the same commit
+that wrote the paragraphs claiming otherwise.
+
+- The `stateImage` assertion. The paragraph said it compared against
+  `"${stateDirectory}/"`; the code said `!lib.hasPrefix "/" cfg.stateImage`.
+  It went unnoticed because the module check never ran NixOS assertions: it
+  read individual options (`systemd.units...text`, `environment.etc...`),
+  and assertions are only evaluated through `system.build.toplevel`. The
+  check host set `stateImage = "/var/lib/jorb.img"`, which this assertion
+  rejects, and the check passed anyway. V3 closes that.
+- `jorb-vmm` having no handle type. The simplification pass removed one, and
+  the same "wip" commit added `Vmm` and `Vm` back without touching the
+  paragraph. Nothing compares prose to code; the only defence was the
+  milestone review, which in that session was a self-review.
+- Both paragraphs now carry a correction note in place, and the code
+  matches what they describe (S3, R7).
