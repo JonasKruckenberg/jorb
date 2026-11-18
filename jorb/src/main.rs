@@ -48,10 +48,17 @@ async fn main() -> ExitCode {
         }
     };
 
-    let _span = info_span!("request", op = request.operation.name(), orb = %request.orb).entered();
+    let _span = info_span!("request", op = request.kind.name(), orb = %request.orb).entered();
+
     let started = Instant::now();
-    let result = run(&request, &settings).await;
+    let result = {
+        let _lock = lock(&settings).await?;
+        timeout(limits::REQUEST_DEADLINE, request.apply(&settings))
+            .await
+            .with_context(|| format!("not finished within {:?}", limits::REQUEST_DEADLINE))?
+    };
     let elapsed_ms = started.elapsed().as_millis();
+
     match result {
         Ok(()) => {
             info!(outcome = "ok", elapsed_ms, "request done");
@@ -67,15 +74,6 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// Holds the host's one lock for the whole request, so no two interleave, and
-/// applies the operation under a deadline below Amp's.
-async fn run(request: &Request, settings: &Settings) -> Result<()> {
-    let _lock = lock(settings).await?;
-    timeout(limits::REQUEST_DEADLINE, request.apply(settings))
-        .await
-        .with_context(|| format!("not finished within {:?}", limits::REQUEST_DEADLINE))?
 }
 
 async fn lock(settings: &Settings) -> Result<File> {

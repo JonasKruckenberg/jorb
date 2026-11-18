@@ -10,11 +10,6 @@
 //! | pause | `vm::power_off` |
 //! | delete | `vm::power_off`, remove the disk |
 //! | spawn | nothing if running with an equal config disk; otherwise `vm::power_off`, `ensure_disk`, `vm::boot` |
-//!
-//! "Running without a disk" is unreachable: the disk exists before the VM
-//! boots and the VM is off before the disk goes. Each step establishes its own
-//! preconditions, and nothing cleans up on the way out; what a failed request
-//! leaves is the next one's to clear.
 
 use std::fmt;
 use std::fs::File;
@@ -32,7 +27,14 @@ use crate::{limits, systemd, vm};
 #[derive(Debug)]
 pub struct Request {
     pub orb: OrbId,
-    pub operation: Operation,
+    pub kind: RequestKind,
+}
+
+#[derive(Debug)]
+pub enum RequestKind {
+    Spawn(ConfigDisk),
+    Pause,
+    Delete,
 }
 
 impl Request {
@@ -46,21 +48,24 @@ impl Request {
                 };
                 ensure!(!config_disk.orb_token.is_empty(), "ORB_TOKEN is empty");
                 config_disk.write_to(io::sink())?;
-                Operation::Spawn(config_disk)
+                RequestKind::Spawn(config_disk)
             }
-            "pause" => Operation::Pause,
-            "delete" => Operation::Delete,
+            "pause" => RequestKind::Pause,
+            "delete" => RequestKind::Delete,
             other => bail!("ORB_OPERATION is {other:?}, which is not spawn, pause or delete"),
         };
-        Ok(Self { orb, operation })
+        Ok(Self {
+            orb,
+            kind: operation,
+        })
     }
 
     /// Drives the request's orb to the state its operation asks for.
     pub async fn apply(&self, settings: &Settings) -> Result<()> {
         let running = clear_dead_orbs(settings).await?;
         let orb = &self.orb;
-        match &self.operation {
-            Operation::Spawn(config_disk) => {
+        match &self.kind {
+            RequestKind::Spawn(config_disk) => {
                 // A changed token leaves the old VM unable to reach Amp, so only an
                 // equal config disk counts as healthy.
                 let current = File::open(settings.config_disk_path(orb)).ok();
@@ -77,8 +82,8 @@ impl Request {
                 ensure_disk(settings, orb)?;
                 vm::boot(settings, orb, config_disk).await
             }
-            Operation::Pause => vm::power_off(settings, orb).await,
-            Operation::Delete => {
+            RequestKind::Pause => vm::power_off(settings, orb).await,
+            RequestKind::Delete => {
                 vm::power_off(settings, orb).await?;
                 vm::remove_if_present(&settings.disk_path(orb))
             }
@@ -86,16 +91,7 @@ impl Request {
     }
 }
 
-/// Only a spawn carries a config disk, so a spawn without a token cannot be
-/// represented. The config disk's `Debug` omits the token.
-#[derive(Debug)]
-pub enum Operation {
-    Spawn(ConfigDisk),
-    Pause,
-    Delete,
-}
-
-impl Operation {
+impl RequestKind {
     /// As Amp spells it, for the `op` log field.
     pub fn name(&self) -> &'static str {
         match self {
@@ -215,7 +211,7 @@ mod tests {
     #[test]
     fn only_a_spawn_needs_a_token_and_it_must_not_be_empty() {
         let pause = parse(&[("ORB_OPERATION", "pause"), ("ORB_ID", "amp-1")]).unwrap();
-        assert_eq!(pause.operation.name(), "pause");
+        assert_eq!(pause.kind.name(), "pause");
 
         for token in [None, Some("")] {
             let mut variables = vec![("ORB_OPERATION", "spawn"), ("ORB_ID", "amp-1")];
@@ -240,7 +236,7 @@ mod tests {
         .unwrap();
         assert!(!format!("{request:?}").contains("must-not-leak"));
 
-        let Operation::Spawn(disk) = request.operation else {
+        let RequestKind::Spawn(disk) = request.kind else {
             panic!("a spawn");
         };
         assert_eq!(disk.orb_token, "must-not-leak");
