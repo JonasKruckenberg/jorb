@@ -550,6 +550,13 @@ change, so it waits on the owner.
 2. **A second architecture.** Added at the owner's request and removed again
    by S2, when the owner scoped jorb to aarch64 NixOS.
 
+3. **`panic=-1` on the guest cmdline** (raised by B3). If jorb-init's
+   reboot syscall ever fails, it exits, the kernel panics, and without
+   `panic=` the guest halts with its unit still active and the VM reported
+   `Running`, so spawn would leave it alone. `panic=-1` makes the kernel
+   reboot instead, which Cloud Hypervisor turns into a VM exit, which stops
+   the unit. It changes the fixed cmdline, so it waits for the owner.
+
 ## Notes per task
 
 ### T0
@@ -1287,3 +1294,28 @@ holder may run 240 s.
   `evaluation panicked: assertion failed: LOCK_WAIT.as_secs() + JOB_DEADLINE.as_secs() < AMP_JOB_TIMEOUT.as_secs()`.
   Restored to 50 s, the container check is clean.
 - Matrix section 8 uses 280 s as its bound.
+
+### B3. jorb-init powered off by accident when bootstrap exited
+
+Confirmed: with no children left, `waitpid` returns `ECHILD`, which fell
+into the generic error arm and powered off with an error event; the
+`Ok(None)` arm cannot occur without `WNOHANG`; `power_off` did not sync; and
+its comment said a kernel panic stops the VM, when without `panic=` on the
+cmdline the kernel halts and the unit stays active.
+
+- The owner chose (2026-11-18) the deliberate version: when bootstrap exits,
+  jorb-init syncs, logs one info event (`bootstrap exited, powering off`,
+  with `exit_status` and `signal`) and powers off. Orphans are still reaped
+  until then. A running orb now means bootstrap is alive.
+- `power_off` calls `sync` first. Its comment says what actually happens if
+  the reboot syscall fails. Adding `panic=-1` to the cmdline would turn that
+  case into a stopped unit, but the cmdline is a fixed interface; it is under
+  Proposals.
+- AGENTS.md's step 7 and the Bounds exemption are reworded.
+- Host check: the test image's stand-in bootstrap exits with status 3 two
+  seconds after `amp ready` when its token contains `exit-bootstrap`, and new
+  matrix section 9 waits for the unit to stop and requires exactly one
+  `bootstrap exited` event and no error in that invocation's journal. The
+  review asked for killing bootstrap; the stand-in exiting by itself tests the
+  same `waitpid` path without reaching into the guest. `[host]` awaiting a run.
+- The container check: clean. shellcheck clean.

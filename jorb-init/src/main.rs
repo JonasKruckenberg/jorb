@@ -1,15 +1,16 @@
 //! Guest PID 1: mount, settle the writeback window, resolve DNS, build the
-//! environment, hand over to `amp orb bootstrap`, then reap for the life of
-//! the guest.
+//! environment, hand over to `amp orb bootstrap`, reap, and power off when
+//! bootstrap exits.
 //!
 //! It knows nothing about Amp's job protocol and nothing about the host. The
 //! config disk on `/dev/vdb` is the whole interface between the two: jorb
 //! writes it, this reads it, and neither needs to agree on anything else.
 //!
-//! Every failure before bootstrap starts ends in a power off. A guest that
-//! cannot run bootstrap has nothing to offer, and a stopped unit is the
-//! truthful state for the host to see. There is no shutdown path: pause is a
-//! power cut, and ext4 replays its journal on the next boot.
+//! A running orb means bootstrap is alive. Every failure before bootstrap
+//! starts ends in a power off, and so does bootstrap exiting: a guest without
+//! it has nothing to offer, and a stopped unit is the truthful state for the
+//! host to see. Pause is a power cut, and ext4 replays its journal on the
+//! next boot.
 
 mod constants;
 
@@ -22,7 +23,7 @@ use anyhow::{Context, Result, bail};
 use rustix::mount::{MountFlags, mount};
 use rustix::process::{WaitOptions, waitpid};
 use rustix::system::{RebootCommand, reboot};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 fn main() -> ! {
     tracing_subscriber::fmt()
@@ -178,31 +179,29 @@ fn spawn_bootstrap(environment: &BTreeMap<String, String>) -> Result<u32> {
     Ok(child.id())
 }
 
-/// Reaps children for the life of the guest.
+/// Reaps children until bootstrap exits, then powers off.
 ///
-/// The one unbounded loop in jorb, and the reason this function returns `!`:
-/// PID 1 inherits every orphan in the guest, and a guest ends by being
-/// switched off, not by this returning. Bootstrap exiting is logged and
-/// nothing more; the orb stays up until the host stops it, as `pause` does.
+/// PID 1 inherits every orphan in the guest, so this reaps whatever exits.
+/// The one loop in jorb without a visible bound: it ends when bootstrap does,
+/// which is why this function returns `!`. With bootstrap still a child,
+/// `waitpid` always has someone to wait for, so any error is unexpected.
 fn reap(bootstrap: u32) -> ! {
     loop {
         match waitpid(None, WaitOptions::empty()) {
-            Ok(Some((pid, status))) => {
-                if pid.as_raw_nonzero().get().cast_unsigned() == bootstrap {
-                    info!(
-                        pid = bootstrap,
-                        exit_status = status.exit_status(),
-                        "bootstrap exited"
-                    );
-                }
-            }
-            // No children left at all. Nothing can arrive after this, so
-            // waiting again would spin.
-            Ok(None) => {
-                warn!("no children left to reap");
+            Ok(Some((pid, status))) if pid.as_raw_nonzero().get().cast_unsigned() == bootstrap => {
+                info!(
+                    pid = bootstrap,
+                    exit_status = status.exit_status(),
+                    signal = status.terminating_signal(),
+                    "bootstrap exited, powering off"
+                );
                 power_off()
             }
-            Err(rustix::io::Errno::INTR) => (),
+            Ok(Some(_)) | Err(rustix::io::Errno::INTR) => (),
+            Ok(None) => {
+                error!("waiting for children returned none, which it cannot without WNOHANG");
+                power_off()
+            }
             Err(error) => {
                 error!(error = error.to_string(), "waiting for children failed");
                 power_off()
@@ -211,18 +210,17 @@ fn reap(bootstrap: u32) -> ! {
     }
 }
 
-/// Switches the guest off. The host sees the unit stop, the truthful state
-/// for a guest with nothing left to do.
+/// Flushes and switches the guest off. The host sees the unit stop.
 fn power_off() -> ! {
+    rustix::fs::sync();
+
     if let Err(error) = reboot(RebootCommand::PowerOff) {
         error!(error = error.to_string(), "powering off failed");
     }
 
-    // The syscall does not return when it works, so reaching here means it
-    // failed. PID 1 exiting panics the kernel, which stops the VM and so the
-    // unit: what the host was going to see anyway. Looping here would be a
-    // second unbounded loop, and the reap loop is the only one jorb allows
-    // itself.
+    // The syscall does not return when it works. If it failed, exiting makes
+    // the kernel panic, and with no `panic=` on the cmdline the guest then
+    // halts: the unit stays active until the host stops it.
     std::process::exit(1)
 }
 

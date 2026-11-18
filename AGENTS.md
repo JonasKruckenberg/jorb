@@ -98,7 +98,7 @@ Units are `jorb-orb-<id>.service` inside `jorb.slice`, started with `systemd-run
 4. Build the environment: `/etc/jorb-env`, then `HOME=/home/user`, `USER=user`, then the config disk's keys.
 5. If `ORB_TOKEN` is missing, or any step above failed, log an error and power off. A stopped unit is the truthful state.
 6. Spawn `setpriv --reuid=user --regid=user --init-groups -- /usr/local/bin/amp orb bootstrap` in `/home/user`.
-7. Reap children for the life of the guest. When bootstrap exits, log its status and keep reaping.
+7. Reap children until bootstrap exits; then sync, log its status in one info event, and power off. A running orb means bootstrap is alive.
 
 `jorb-init` knows nothing about Amp's job protocol; `jorb` knows nothing about guest internals. The config disk is the whole interface between them.
 
@@ -159,7 +159,7 @@ The code is literate in structure, not in comment volume: it is arranged to be r
 - Every loop has a bound visible at the loop: a finite iterator, or a counter checked against a named limit. No `loop` or `while` whose exit depends only on the outside world.
 - Every wait has a deadline and every external call a timeout: subprocesses, API requests, socket and interface polling. The job as a whole has a deadline below Amp's five minutes.
 - Values the design fixes are named constants, each with a doc line saying what it fixes and why that value: the bounds that keep loops and waits finite, and the names, paths, devices and addresses the interface pins down. Every number in "Fixed interfaces" becomes one, for example `MAX_ORB_ID_LEN`, `jorb_config_disk::BYTES`, `MAX_SLOTS`, `API_SOCKET_WAIT`, `UNIT_STOP_TIMEOUT`, `JOB_DEADLINE`. Named limits are required; a global constants file is not. In `jorb`, durations, counts and sizes live in `limits.rs`, and a name, path, program or device lives in the one module that uses it. Smaller crates keep theirs at the top of the file that uses them. No bare literals for sizes, counts, retries, durations or fixed names elsewhere.
-- One exemption: `jorb-init`'s reap loop runs for the life of the guest. It blocks in `waitpid`, lives in a function returning `!`, and is the only such loop.
+- One exemption: `jorb-init`'s reap loop runs until bootstrap exits. It blocks in `waitpid`, lives in a function returning `!`, and is the only such loop.
 - No recursion. If an iterative version would be substantially larger or harder to read, stop and ask, with both versions sketched.
 
 ### Logging and secrets

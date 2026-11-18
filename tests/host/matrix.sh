@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # T11: what jorb does, checked against what the plan says it should do.
 #
-# Eight sections, each printing its own PASS or FAIL line plus evidence, and
+# Nine sections, each printing its own PASS or FAIL line plus evidence, and
 # one summary line at the end. Everything runs against the busybox test image
 # with a dummy token: no Amp, no real orb, no test hooks in jorb itself.
 #
 # Usage: sudo -E tests/host/matrix.sh [section...]
-#   with no arguments it runs all eight.
+#   with no arguments it runs all nine.
 
 # The sections are dispatched by name, which hides every call from here.
 # shellcheck disable=SC2329
@@ -710,13 +710,52 @@ section_8() {
 	finish_section 8 "a stopped VMM does not block the jobs that clear it"
 }
 
+# ------------------------------------------------ 9. bootstrap exiting
+
+section_9() {
+	section 9 "an orb whose bootstrap exits powers off and its unit stops"
+
+	wipe_everything
+	mkdir -p "$JORB_STATE_DIR/disks" "$JORB_RUN_DIR"
+
+	local orb=m9 invocation log exits errors waited=0 stopped=
+
+	job spawn "$orb" "$token-exit-bootstrap" || note "the spawn failed"
+	wait_until_ready "$orb" || true
+	# Read now: once the unit is collected, guest_log has nothing to go on.
+	invocation=$(systemctl show -p InvocationID --value "$(unit_of "$orb")")
+
+	while [ "$waited" -lt "$boot_deadline" ]; do
+		if ! systemctl is-active --quiet "$(unit_of "$orb")"; then
+			stopped=yes
+			break
+		fi
+		sleep 1
+		waited=$((waited + 1))
+	done
+	evidence "the unit was active for ${waited}s after the stand-in said it was ready"
+	[ -n "$stopped" ] || note "the unit was still active ${boot_deadline}s after ready"
+
+	log=$(journalctl "_SYSTEMD_INVOCATION_ID=$invocation" --no-pager --output cat 2>/dev/null || true)
+	exits=$(printf '%s\n' "$log" | grep -c 'bootstrap exited, powering off' || true)
+	errors=$(printf '%s\n' "$log" | grep -c '"level":"ERROR"' || true)
+	evidence "jorb-init logged $exits exit events and $errors errors"
+	[ "$exits" -eq 1 ] || note "expected one 'bootstrap exited' event, saw $exits"
+	[ "$errors" -eq 0 ] || note "jorb-init logged an error on the way out"
+
+	job delete "$orb" || note "the cleanup delete failed"
+	wipe_everything
+	expect_no_debris || note "something was left behind"
+	finish_section 9 "an orb whose bootstrap exits powers off and its unit stops"
+}
+
 # ------------------------------------------------------------------ the whole
 
 setup
 
 requested=("$@")
 if [ "${#requested[@]}" -eq 0 ]; then
-	requested=(1 2 3 4 5 6 7 8)
+	requested=(1 2 3 4 5 6 7 8 9)
 fi
 
 for number in "${requested[@]}"; do

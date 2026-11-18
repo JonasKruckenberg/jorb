@@ -88,6 +88,15 @@ esac
 
 echo "JORB-GATE amp ready"
 
+# Bootstrap ending, for the section that checks the guest powers off after it.
+case "${ORB_TOKEN:-}" in
+*exit-bootstrap*)
+	sleep 2
+	echo "JORB-GATE amp exiting"
+	exit 3
+	;;
+esac
+
 # Stay in the foreground for the life of the orb, as bootstrap does.
 while true; do
 	sleep 3600
