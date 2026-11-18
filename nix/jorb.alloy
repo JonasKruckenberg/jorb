@@ -20,6 +20,13 @@ prometheus.scrape "jorb" {
 prometheus.relabel "jorb" {
 	forward_to = [prometheus.remote_write.jorb.receiver]
 
+	// Until G7 shows the exporter's own restriction holds.
+	rule {
+		action        = "keep"
+		source_labels = ["id"]
+		regex         = "/jorb\\.slice/.*"
+	}
+
 	// /jorb.slice/jorb-orb-amp-1.service becomes orb="amp-1".
 	rule {
 		action        = "replace"
