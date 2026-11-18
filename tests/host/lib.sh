@@ -174,12 +174,10 @@ start_test_vm() {
 		-p Type=exec -p TimeoutStopSec=5 -p OOMScoreAdjust=500 \
 		-- cloud-hypervisor --api-socket "$gate_socket" >/dev/null
 
-	# This run's journal and no other. Filtering by unit alone reads back
-	# whatever an earlier run of the same gate left, and the time window this
-	# replaces was worse than useless: `date -u` prints UTC while
-	# `journalctl --since` reads local time, so on a host an hour ahead of UTC
-	# the window opened an hour early and the gate found the previous run's
-	# markers on its first poll, in zero seconds.
+	# This run's journal and no other: filtering by unit alone reads back
+	# whatever an earlier run of the same gate left. A time window does not
+	# work either, because `date -u` prints UTC and `journalctl --since` reads
+	# local time.
 	gate_invocation=$(systemctl show -p InvocationID --value "$gate_unit.service")
 
 	if ! wait_for_path "$gate_socket" "${JORB_API_SOCKET_WAIT:-15}"; then

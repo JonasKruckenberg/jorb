@@ -1226,3 +1226,23 @@ Confirmed for each item.
   next" follow.
 - `shellcheck -x` over every script and `nixfmt --check` over every Nix file:
   clean. `packages.aarch64-linux.test-image` evaluates.
+
+### R9. Comments
+
+Confirmed: comments narrated history ("used to be") and recorded gates (`A2,
+verified 2026-11-18`), and `nix/image.nix` said the script runs as the
+provider's `ExecStartPre`.
+
+- The `jorb` modules were rewritten in R1 with one `//!` paragraph each and
+  comments only for what the code cannot say. The jorb-vmm gate records went
+  in R7, the jorb-init `A2` record and a lib.sh paragraph about a fixed bug
+  here. `nix/image.nix` now names `jorb-base-image.service`.
+- `git grep -i -E 'used to|no longer|verified|ExecStartPre|20[0-9]{2}-[0-9]{2}-[0-9]{2}'`
+  outside PROGRESS.md and PLAN.md: only AGENTS.md's instruction text and
+  test scripts' "a previous run" wording, which describe what the code
+  guards against rather than history.
+- Comment lines against code lines (non-blank, tests included) in the Rust
+  is now 382 to 1640, about one to four; it was about one to three.
+  `ASSUMES A11` in `nix/jorb.alloy` stays: A11 is not yet verified, and the
+  marker is what AGENTS.md asks for.
+- shellcheck and the container check: clean.

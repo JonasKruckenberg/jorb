@@ -1,11 +1,11 @@
 # jorb-prepare-image: turns the pinned Amp orb image into /var/lib/jorb/base.raw.
 #
 # Every orb's disk is a reflink clone of that file, so this runs once per host
-# (as the provider service's ExecStartPre) and exits immediately when the base
-# is already there. It needs root: the image's ownership and setuid bits have
+# (as jorb-base-image.service, before the provider) and exits immediately when
+# the base is already there. It needs root: the image's ownership and setuid bits have
 # to survive into the ext4, and mkfs.ext4 -d keeps whatever the unpack left.
 #
-# The digests below are what the gate records. Refresh them by running
+# The digest below is what the gate records. Refresh it by running
 # tests/host/amp-image.sh, which prints the current one; the `latest` tags
 # move often, which is the reason jorb pins a digest rather than a tag.
 {
