@@ -1242,7 +1242,8 @@ provider's `ExecStartPre`.
   test scripts' "a previous run" wording, which describe what the code
   guards against rather than history.
 - Comment lines against code lines (non-blank, tests included) in the Rust
-  is now 382 to 1640, about one to four; it was about one to three.
+  is now 352 to 1640, about one to five; the review measured about one
+  to three.
   `ASSUMES A11` in `nix/jorb.alloy` stays: A11 is not yet verified, and the
   marker is what AGENTS.md asks for.
 - shellcheck and the container check: clean.
