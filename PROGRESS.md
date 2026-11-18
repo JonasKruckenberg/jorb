@@ -20,7 +20,7 @@
 
 `nix flake check` passes from a clean checkout (verified by cloning the
 repository into a temporary directory and running it there). It covers
-formatting, clippy with the workspace's denied lints, the test suite (41 unit
+formatting, clippy with the workspace's denied lints, the test suite (26 unit
 tests), evaluation of a host that enables the module, and `nft --check` over
 the network policy that host generates.
 
@@ -56,7 +56,7 @@ The gates read `JORB_*` from the environment, so `sudo -E` rather than plain
 |---|---|
 | G1 | PASS. 15673 MiB total, 12309 MiB available, so `memoryHigh = 11797M` |
 | G2 | PASS. `hpage_pmd_size` is 33554432 (32 MiB), so A6 holds |
-| G3 | FAIL. `/var/lib/jorb` does not exist; the XFS partition is the owner's step |
+| G3 | `/var/lib/jorb` is now an XFS mount, so the owner's step is done. The gate writes a test file into it, so the run itself still needs root |
 | G4 | awaiting root |
 | G5 | awaiting root |
 | G6 | PASS. A7 and A8 hold; digest recorded |
@@ -94,8 +94,12 @@ startup.
    it is an upper bound rather than the steady state the plan asks about.
    Worth re-reading once T9 and T10 are actually on the host.
 3. This session has no passwordless sudo, so G3, G4, G5, G7, T5's in-guest
-   run, T6's image build and all of T11 are written but unrun. They need
-   either a root shell or a sudo rule.
+   run, T6's image build and all of T11 are written but unrun. What they
+   actually need is CAP_NET_ADMIN to create the slot taps, system-scope
+   systemd-run and cgroup reads, and write access to root-owned
+   /var/lib/jorb. Nothing short of root grants that set, so it is a root
+   shell or a NOPASSWD rule; a password prompt cannot be answered from a
+   non-interactive session.
 4. The `latest` tags on the Amp orb images move often: the arm64 digest
    changed between two G6 runs less than an hour apart. T6 pins a digest, and
    refreshing it means running G6 again.
@@ -105,13 +109,14 @@ startup.
 
 ## Proposals
 
-1. **The provider's unit name collides with the orbs'.** `jorb-provider.service`
-   matches the `jorb-*.service` pattern recover looks for, and parses as an orb
-   called "provider". Recover now also requires `jorb.slice`, which the
-   provider is not in, so the current code is safe. A fixed interface that
-   cannot collide at all would be a separate prefix for orb units, for example
-   `jorb-orb-<id>.service`. That is a change to Fixed interfaces, so it is a
-   proposal rather than a change.
+1. **Orb units are now `jorb-orb-<id>.service`.** Accepted by the owner on
+   2026-11-18 and done, so this is a record rather than a proposal. The old
+   `jorb-<id>` pattern caught two other kinds of unit: `jorb-provider.service`,
+   which parsed as an orb called "provider", and the gates' own
+   `jorb-gate-<id>` units, which run VMs in `jorb.slice` and whose ids parse
+   cleanly, so recover could have stopped a gate mid-run. Both are out of reach
+   by name now, and recover no longer asks systemd for each unit's slice to
+   tell them apart.
 2. **x86_64 hosts.** Added at the owner's request during this session. It
    changes one thing in Fixed interfaces: the cmdline's console is `ttyS0` on
    x86_64 rather than `ttyAMA0`. Everything else is per-architecture Nix.
@@ -204,7 +209,7 @@ session):
 |---|---|
 | G1 | PASS. 15673 MiB total, 12309 MiB available, so `memoryHigh = 11797M` |
 | G2 | PASS. `hpage_pmd_size` is 33554432 (32 MiB), so A6 holds |
-| G3 | FAIL. `/var/lib/jorb` does not exist yet; the XFS partition is the owner's step |
+| G3 | `/var/lib/jorb` is XFS as of 2026-11-18; the gate still needs root to write into it |
 | G4 | awaiting a run as root (taps, systemd-run, cgroups) |
 | G5 | awaiting a run as root |
 | G6 | see below |
@@ -371,6 +376,104 @@ Notes:
 - Awaiting a run as root. It is the only thing that can turn T8's "behaviour
   verified in T11" into a result.
 
+## Simplification pass, 2026-11-18
+
+Asked for by the owner after T11: fewer states, fewer types, clearer module
+boundaries, tests only where they earn their place. No task's behaviour
+changed except the two items marked below. `nix flake check` passes.
+
+What came out, and why each was not pulling its weight:
+
+- **`jorb-vmm`'s `Vm` handle.** "Absent" had two representations: `attach`
+  returned `Option<Vm>` and `VmState` had an `Absent` variant, so every
+  observation was a ping followed by a `vm.info`. The typestate it was meant
+  to provide was not true either, because `attach` minted a `Vm` for a VM that
+  did not exist. The crate is now `VmBuilder::boot(socket) -> Result<()>` and
+  `state(socket) -> Result<VmState>`, where an API socket is the only name for
+  a VM and `Absent` is the single answer for a socket that is gone, dead or
+  has no VM. One request per observation instead of two.
+- **`Paths`.** Six fields of which three were host-wide, not per-orb, so the
+  same lock and base image arrived under an orb's name, and `disks_directory`
+  carried an `unwrap_or` for a case that cannot happen. `Settings` already
+  holds the two directories, so the layout is now pure functions in `host.rs`
+  over `&Settings`, with the orb passed where it matters.
+- **`run_allowing_failure` and `run_to_completion`.** The first existed only
+  because `systemctl is-active` exits non-zero for an inactive unit.
+  `systemctl show --property=ActiveState --value` reports `inactive` and exits
+  0 even for a unit systemd has never heard of (checked on this host), so
+  there is one `run` and no second meaning for a non-zero exit.
+- **`unit_slice`.** Only needed to tell `jorb-provider.service` from an orb's
+  unit. The `jorb-orb-` prefix does that by construction, so recover makes one
+  fewer subprocess call per unit per job.
+- **`ConfigDisk::encode`.** `new` validated and `encode` serialised, leaving a
+  validated-but-unencoded state and a second copy of the token in memory.
+  `ConfigDisk` now holds the padded block itself, with one fallible
+  constructor and a hand-written `Debug` that never prints it. The two keys
+  are a table the constructor walks, so the newline-and-NUL refusal is written
+  once instead of per key, and a third key would be one line.
+- **`Slot::netmask`**, a method that ignored `self` and returned the same /30
+  for every slot. Now `limits::GUEST_NETMASK`.
+- **`Outcome.changed`**, which was `before != after` stored next to `before`
+  and `after`. The struct is `Transition` now, so it stops colliding with the
+  `outcome` log field, which means something else.
+- **`examples/ping.rs`.** It was `state()` spelled out by hand; `examples/boot.rs`
+  exercises the same transport and more, and the gates query `vm.info` with
+  curl on purpose, independently of jorb's own code.
+- **`Job`** is `Request`, at the owner's request: too close to `jorb` to read
+  quickly.
+- **`tokio` in `jorb-vmm`** is a dev-dependency. Nothing in the library used
+  it; the generated client uses `reqwest` and `serde_json` only.
+
+Smaller things, from a second round aimed at code size rather than structure:
+
+- `systemd-run` takes `--property=NAME=VALUE` as one argument, so the three
+  properties stop being six array entries.
+- `--api-socket=` likewise, which also drops one `to_string_lossy`.
+- `ensure_disk`'s error contexts named both paths in two of its messages,
+  which rustfmt then spread over four lines each. They name the one path that
+  identifies the failure now.
+- `jorb-vmm` had `1024 * 1024` inline; it is `limits::BYTES_PER_MIB`, which is
+  what the conventions ask for.
+
+One thing tried and reverted, recorded so it is not tried again without the
+argument being better: replacing `VmBuilder` with a `VmShape` struct of
+exactly the fixed interface, on the grounds that each of its six methods has
+one caller and that `without_huge_pages` and `free_page_reporting` are never
+really optional. The owner's call is that the builder stays.
+
+Four things that were dead or wrong, found by reading rather than by running:
+
+- `start` called `Span::current().record("slot", ...)` on a field the
+  `#[instrument]` attribute never declared, so the slot never reached the
+  span. tracing drops a record for an undeclared field without complaining.
+  The field is declared now, so the dashboard's `slot` is on the span as well
+  as the two events.
+- `lowest_free_slot` carried `u8::try_from(index).context("a slot index past
+  255")` on an index that cannot reach 256. The loop is `(0..=u8::MAX).take(n)`
+  now, which is u8-typed and still shows its bound.
+- **Behaviour change.** `jorb-init` read `/etc/jorb-env` with
+  `unwrap_or_default()`, so an image without it booted on with no `PATH`.
+  AGENTS.md's step 5 says a failed setup step powers off, and
+  jorb-prepare-image always writes the file, so its absence means this is not
+  the image jorb built. It is an error now.
+- **Behaviour change.** Spawn observed the VM state again after converge had
+  just observed it under the same lock. Converge passes what it saw.
+
+Tests went from 41 to 26. Nothing's coverage was dropped: the ones that went
+were strictly subsumed (256 distinct slot networks, which tested
+`Ipv4Addr::new`; two identical config disks being byte-equal, which the exact
+byte assertion already proves; disk ordering, which the golden JSON carries),
+and the rest were merged into tables where they had been one test per input.
+
+Sizes after the pass, counting lines that are neither blank, comment nor
+test: `jorb` 601 against the guidance's 300, `jorb-vmm` 248 against 150,
+`jorb-init` 166 against 150. All three are still over, and the remaining
+excess is code rather than prose: `jorb`'s eighteen functions, and
+`jorb-vmm`'s builder plus its error enum. The honest reading is that the
+guidance is measuring something real and two rounds of deleting indirection
+did not reach it, so the next move is structural rather than cosmetic. Worth a
+second pair of eyes on whether `jorb` wants splitting.
+
 ## Review
 
 AGENTS.md asks for a reviewer with fresh context at the end of a milestone.
@@ -382,8 +485,8 @@ orbs' pattern in `recover`, and a second unbounded loop in `jorb-init`'s
 `power_off` fallback, which is now `exit(1)` and so leaves the reap loop as
 the only one.
 
-Worth a second pair of eyes anyway: the three crates are over the size
-guidance (`jorb-vmm` about 300 hand-written lines against 150, `jorb` about
-470 against 300, `jorb-init` about 230 against 150). Most of the excess is
-the `//!` and `///` prose the conventions ask for plus the error enum, but it
-is the kind of thing the guidance exists to flag.
+The simplification pass above was reviewed the same way, against the same
+sections. The unit rename is the part that reaches outside Rust: Alloy's
+relabel regex, the dashboard's `orb` label, G1's pattern and matrix.sh all
+had to move with it, and matrix.sh lost the `grep -v jorb-provider.service`
+it needed twice.

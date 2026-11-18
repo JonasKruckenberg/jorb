@@ -10,3 +10,6 @@ use std::time::Duration;
 /// stopped answering rather than one that is busy. Short enough that a job can
 /// make several calls and still finish well inside Amp's five minutes.
 pub const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Cloud Hypervisor sizes memory in bytes; jorb thinks in MiB.
+pub const BYTES_PER_MIB: i64 = 1024 * 1024;

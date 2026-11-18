@@ -35,12 +35,12 @@ prometheus.relabel "jorb" {
 		regex         = "/jorb\\.slice(/.*)?"
 	}
 
-	// /jorb.slice/jorb-amp-T-1a2b.service becomes orb="amp-T-1a2b", which is
+	// /jorb.slice/jorb-orb-amp-T-1a2b.service becomes orb="amp-T-1a2b", which is
 	// the label every panel groups by.
 	rule {
 		action        = "replace"
 		source_labels = ["id"]
-		regex         = "/jorb\\.slice/jorb-(.+)\\.service"
+		regex         = "/jorb\\.slice/jorb-orb-(.+)\\.service"
 		target_label  = "orb"
 		replacement   = "$1"
 	}

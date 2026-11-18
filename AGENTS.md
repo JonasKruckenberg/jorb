@@ -47,7 +47,7 @@ Rules that keep this correct:
 jorb is crash-only: the start path is the recovery path, and there is no other.
 
 - Assume any previous job was killed at any instruction. `kill -9`, a host power cut and an ordinary error must all leave something the next job handles the same way.
-- `recover` stops every `jorb-*` unit whose VM is not `Running` according to its API. Under the lock no job is mid-start, so such a unit is debris from a job that died. This is what frees a slot held by a half-started VM, including one that belongs to a different orb.
+- `recover` stops every `jorb-orb-*` unit whose VM is not `Running` according to its API. Under the lock no job is mid-start, so such a unit is debris from a job that died. This is what frees a slot held by a half-started VM, including one that belongs to a different orb.
 - Each primitive establishes its own preconditions on entry rather than trusting a predecessor's exit: truncate `disks/.tmp`, remove a stale socket, overwrite the config disk.
 - Write no cleanup that runs on the way out: no cleanup in error branches, no `Drop` for external state, no signal handlers. That code would be a second path that a kill skips anyway.
 - Fail early and loudly. On any unexpected condition, log one error event with the evidence and exit non-zero. No retries inside a job, no fallbacks, no silent repair. "Crash" here means an error return with context, not `panic!`; the clippy ban on panics stays because an error carries a better message.
@@ -73,7 +73,7 @@ Changing anything in this section is a design change. Propose it first.
 | `/run/jorb/<id>.cfg` | config disk, mode 0600 |
 | `/run/jorb/<id>.sock` | Cloud Hypervisor API socket |
 
-Units are `jorb-<id>.service` inside `jorb.slice`, started with `systemd-run --collect`.
+Units are `jorb-orb-<id>.service` inside `jorb.slice`, started with `systemd-run --collect`. The `jorb-orb-` prefix is the whole reason recover is safe: no other unit on the host, the provider's own `jorb-provider.service` and the gates' `jorb-gate-*` included, can be read as an orb's.
 
 **Slots.** Slot `S` ranges over `0..JORB_SLOTS`, at most 256. Tap `jorb<S>`, host address `10.77.S.1/30`, guest address `10.77.S.2`. A slot is free when `/sys/class/net/jorb<S>` is absent. No free slot is the capacity error; there is no other counter.
 
@@ -107,7 +107,7 @@ Units are `jorb-<id>.service` inside `jorb.slice`, started with `systemd-run --c
 
 | Crate | Role | Runtime dependencies (allowlist) |
 |---|---|---|
-| `jorb-vmm` (lib) | Generated Cloud Hypervisor client behind `VmBuilder` and `Vm`. Knows nothing about systemd, slots or Amp | `progenitor-client`, `reqwest` (no default features, `json`), `serde`, `serde_json`, `thiserror`, `tokio`; build: `progenitor` |
+| `jorb-vmm` (lib) | Generated Cloud Hypervisor client behind `VmBuilder` and `state`. Knows nothing about systemd, slots or Amp | `progenitor-client`, `reqwest` (no default features, `json`), `serde`, `serde_json`, `thiserror`; dev: `tokio`; build: `progenitor` |
 | `jorb` (bin) | Dispatch: env to job, lock, primitives, operations | `jorb-vmm`, `tokio` (current-thread), `clap` (derive, env), `tracing`, `tracing-subscriber` (json), `anyhow`, `rustix`, `secrecy` |
 | `jorb-init` (bin, static musl) | Guest PID 1. Synchronous | `rustix`, `tracing`, `tracing-subscriber` (json), `anyhow` |
 
@@ -147,7 +147,7 @@ The code is literate in structure, not in comment volume: it is arranged to be r
 - Write a module's public signatures before its bodies. Check them against three questions: what must the caller know, what can the caller get wrong, and what does this module refuse to know? If the answer to the second is not "nothing", narrow the types.
 - Parse at the edge, once. `OrbId`, `Slot` and `ConfigDisk` are constructed only through fallible parsers; functions take these types, never raw strings.
 - No boolean parameters in public functions. Use two methods or an enum.
-- Use typestate where it deletes a state: `VmBuilder::boot` returns `Vm`, and a `Vm` exists only for a booted VM.
+- Use typestate where it deletes a state. Do not add a handle type that only names something a path already names: `jorb-vmm` takes an API socket everywhere, because a second name for one VM would be a second thing to keep true.
 - Errors are part of the interface: `thiserror` enums in `jorb-vmm`; `anyhow` with `.context(...)` in binaries. No `unwrap`, `expect`, `panic!`, `todo!` or `dbg!` outside tests (clippy enforces this).
 - No traits, generics or modules for hypothetical future use.
 - All `ORB_*` input is untrusted (see Security). Never build a shell string; use `Command` with separate arguments.

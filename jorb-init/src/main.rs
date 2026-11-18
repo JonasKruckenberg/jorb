@@ -6,11 +6,10 @@
 //! config disk on `/dev/vdb` is the whole interface between the two: jorb
 //! writes it, this reads it, and neither needs to agree on anything else.
 //!
-//! Every failure before bootstrap starts ends in a power off rather than a
-//! retry. A guest that cannot run bootstrap has nothing to offer, and a
-//! stopped unit is the truthful state for the host to see. There is no
-//! shutdown path: pause is a power cut, and ext4 replays its journal on the
-//! next boot.
+//! Every failure before bootstrap starts ends in a power off. A guest that
+//! cannot run bootstrap has nothing to offer, and a stopped unit is the
+//! truthful state for the host to see. There is no shutdown path: pause is a
+//! power cut, and ext4 replays its journal on the next boot.
 
 mod limits;
 
@@ -31,7 +30,7 @@ fn main() -> ! {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    match setup() {
+    match start_bootstrap() {
         Ok(bootstrap) => reap(bootstrap),
         Err(error) => {
             error!(error = format!("{error:#}"), "setup failed, powering off");
@@ -40,9 +39,9 @@ fn main() -> ! {
     }
 }
 
-/// Everything that has to be true before bootstrap starts, in order. Returns
-/// the bootstrap process, which is the only thing the guest exists to run.
-fn setup() -> Result<std::process::Child> {
+/// Everything that has to be true before bootstrap starts, in order, then
+/// bootstrap itself. Returns its pid, which is the one child reap reports on.
+fn start_bootstrap() -> Result<u32> {
     mount_filesystems()?;
     shorten_the_writeback_window()?;
     write_resolv_conf()?;
@@ -52,32 +51,27 @@ fn setup() -> Result<std::process::Child> {
         Path::new(limits::CONFIG_DISK_DEVICE),
     )?;
 
-    start_bootstrap(&environment)
+    spawn_bootstrap(&environment)
 }
 
 /// The kernel mounts devtmpfs itself; these are the rest of what a userspace
 /// expects to find.
 fn mount_filesystems() -> Result<()> {
-    let shm_size = format!("size={}", limits::DEV_SHM_SIZE);
-
-    for (source, target, filesystem, data) in [
+    for (source, target, filesystem, options) in [
         ("proc", "/proc", "proc", None),
         ("sysfs", "/sys", "sysfs", None),
         ("devpts", "/dev/pts", "devpts", None),
-        ("tmpfs", "/dev/shm", "tmpfs", Some(shm_size.as_str())),
+        ("tmpfs", "/dev/shm", "tmpfs", Some(limits::DEV_SHM_OPTIONS)),
         ("tmpfs", "/run", "tmpfs", None),
     ] {
         fs::create_dir_all(target).with_context(|| format!("creating {target}"))?;
-
-        let flags = MountFlags::NOSUID | MountFlags::NODEV;
-        let options = data.map(std::ffi::CString::new).transpose()?;
 
         mount(
             source,
             target,
             filesystem,
-            flags,
-            options.as_ref().map(AsRef::as_ref),
+            MountFlags::NOSUID | MountFlags::NODEV,
+            options,
         )
         .with_context(|| format!("mounting {filesystem} on {target}"))?;
     }
@@ -109,8 +103,14 @@ fn write_resolv_conf() -> Result<()> {
 /// The environment bootstrap runs with: the image's own variables, then who
 /// the guest runs as, then the config disk, which wins because it is the one
 /// thing the host said about this orb.
+///
+/// A missing env file is a failure. jorb-prepare-image always writes one, so
+/// its absence means this is not the image jorb built, and booting on without
+/// the image's PATH would only fail further in.
 fn environment(env_file: &Path, config_disk: &Path) -> Result<BTreeMap<String, String>> {
-    let mut environment = parse_env_file(&fs::read_to_string(env_file).unwrap_or_default());
+    let image =
+        fs::read_to_string(env_file).with_context(|| format!("reading {}", env_file.display()))?;
+    let mut environment = parse_env_file(&image);
 
     environment.insert("HOME".to_owned(), limits::GUEST_HOME.to_owned());
     environment.insert("USER".to_owned(), limits::GUEST_USER.to_owned());
@@ -127,8 +127,8 @@ fn environment(env_file: &Path, config_disk: &Path) -> Result<BTreeMap<String, S
 }
 
 /// `KEY=VALUE` lines, as the image's own `Env` was written out. Blank lines
-/// and comments are skipped; so is anything without a `=`, because an image
-/// that writes something else is not describing an environment.
+/// and comments are skipped, and so is anything without a `=`: an image that
+/// writes something else is not describing an environment.
 fn parse_env_file(contents: &str) -> BTreeMap<String, String> {
     contents
         .lines()
@@ -161,9 +161,8 @@ fn parse_config_disk(disk: &[u8]) -> Result<BTreeMap<String, String>> {
 ///
 /// The child keeps running after this returns: it is the guest's whole
 /// purpose, and PID 1 only reaps from here on.
-fn start_bootstrap(environment: &BTreeMap<String, String>) -> Result<std::process::Child> {
-    let mut command = Command::new(limits::SETPRIV);
-    command
+fn spawn_bootstrap(environment: &BTreeMap<String, String>) -> Result<u32> {
+    let child = Command::new(limits::SETPRIV)
         .args([
             &format!("--reuid={}", limits::GUEST_USER),
             &format!("--regid={}", limits::GUEST_USER),
@@ -175,9 +174,7 @@ fn start_bootstrap(environment: &BTreeMap<String, String>) -> Result<std::proces
         ])
         .current_dir(limits::GUEST_HOME)
         .env_clear()
-        .envs(environment);
-
-    let child = command
+        .envs(environment)
         .spawn()
         .with_context(|| format!("spawning {} through {}", limits::AMP, limits::SETPRIV))?;
 
@@ -187,19 +184,17 @@ fn start_bootstrap(environment: &BTreeMap<String, String>) -> Result<std::proces
         "bootstrap started"
     );
 
-    Ok(child)
+    Ok(child.id())
 }
 
 /// Reaps children for the life of the guest.
 ///
 /// The one unbounded loop in jorb, and the reason this function returns `!`:
 /// PID 1 inherits every orphan in the guest, and a guest ends by being
-/// switched off rather than by this returning. Bootstrap exiting is logged and
-/// nothing else: the orb stays up until the host stops it, which is what
+/// switched off, not by this returning. Bootstrap exiting is logged and
+/// nothing more; the orb stays up until the host stops it, which is what
 /// `pause` does.
-fn reap(bootstrap: std::process::Child) -> ! {
-    let bootstrap = bootstrap.id();
-
+fn reap(bootstrap: u32) -> ! {
     loop {
         match waitpid(None, WaitOptions::empty()) {
             Ok(Some((pid, status))) => {
@@ -235,9 +230,9 @@ fn power_off() -> ! {
 
     // The syscall does not return when it works, so reaching here means it
     // failed. PID 1 exiting panics the kernel, which stops the VM and so the
-    // unit, which is the same thing the host was going to see. Looping here
-    // instead would be a second unbounded loop, and the reap loop is the only
-    // one jorb allows itself.
+    // unit, which is what the host was going to see anyway. Looping here would
+    // be a second unbounded loop, and the reap loop is the only one jorb
+    // allows itself.
     std::process::exit(1)
 }
 
@@ -245,35 +240,12 @@ fn power_off() -> ! {
 mod tests {
     use super::*;
 
-    #[test]
-    fn env_file_lines_become_variables() {
-        let parsed = parse_env_file(
-            "PATH=/usr/bin:/bin\n\
-             \n\
-             # a comment\n\
-             LANG=C.UTF-8\n\
-             NOT_AN_ASSIGNMENT\n\
-             EMPTY=\n",
-        );
-
-        assert_eq!(
-            parsed.get("PATH").map(String::as_str),
-            Some("/usr/bin:/bin")
-        );
-        assert_eq!(parsed.get("LANG").map(String::as_str), Some("C.UTF-8"));
-        assert_eq!(parsed.get("EMPTY").map(String::as_str), Some(""));
-        assert!(!parsed.contains_key("NOT_AN_ASSIGNMENT"));
-        assert_eq!(parsed.len(), 3);
-    }
-
-    #[test]
-    fn a_value_may_contain_an_equals_sign() {
-        let parsed = parse_env_file("AMP_URL=https://example.test/?a=b\n");
-
-        assert_eq!(
-            parsed.get("AMP_URL").map(String::as_str),
-            Some("https://example.test/?a=b")
-        );
+    /// A directory of this test's own, so two tests cannot tread on each
+    /// other's files.
+    fn test_directory(name: &str) -> std::path::PathBuf {
+        let directory = std::env::temp_dir().join("jorb-init-tests").join(name);
+        fs::create_dir_all(&directory).unwrap();
+        directory
     }
 
     /// A config disk as jorb writes it: lines, then NUL padding to the block.
@@ -284,9 +256,38 @@ mod tests {
     }
 
     #[test]
-    fn padding_is_not_part_of_the_config() {
-        let parsed = parse_config_disk(&config_disk("ORB_TOKEN=secret\nAMP_URL=https://a.test\n"))
-            .expect("the disk parses");
+    fn env_file_lines_become_variables() {
+        let parsed = parse_env_file(
+            "PATH=/usr/bin:/bin\n\
+             \n\
+             # a comment\n\
+             LANG=C.UTF-8\n\
+             NOT_AN_ASSIGNMENT\n\
+             EMPTY=\n\
+             AMP_URL=https://example.test/?a=b\n",
+        );
+
+        assert_eq!(
+            parsed.get("PATH").map(String::as_str),
+            Some("/usr/bin:/bin")
+        );
+        assert_eq!(parsed.get("LANG").map(String::as_str), Some("C.UTF-8"));
+        assert_eq!(parsed.get("EMPTY").map(String::as_str), Some(""));
+        assert_eq!(
+            parsed.get("AMP_URL").map(String::as_str),
+            Some("https://example.test/?a=b"),
+            "a value may contain an equals sign"
+        );
+        assert!(!parsed.contains_key("NOT_AN_ASSIGNMENT"));
+        assert_eq!(parsed.len(), 4);
+    }
+
+    #[test]
+    fn the_config_disk_ends_where_its_padding_starts() {
+        let parsed = parse_config_disk(&config_disk(
+            "\nORB_TOKEN=secret\n\nAMP_URL=https://a.test\n",
+        ))
+        .expect("the disk parses");
 
         assert_eq!(parsed.get("ORB_TOKEN").map(String::as_str), Some("secret"));
         assert_eq!(
@@ -294,41 +295,33 @@ mod tests {
             Some("https://a.test")
         );
         assert_eq!(parsed.len(), 2);
-    }
 
-    #[test]
-    fn an_empty_config_disk_parses_to_nothing() {
-        let parsed = parse_config_disk(&config_disk("")).expect("the disk parses");
+        assert!(
+            parse_config_disk(&config_disk(""))
+                .expect("an empty disk parses")
+                .is_empty()
+        );
 
-        assert!(parsed.is_empty());
-    }
-
-    #[test]
-    fn blank_lines_in_the_config_disk_are_skipped() {
-        let parsed =
-            parse_config_disk(&config_disk("\n\nORB_TOKEN=secret\n\n")).expect("the disk parses");
-
-        assert_eq!(parsed.len(), 1);
-    }
-
-    #[test]
-    fn nothing_past_the_first_block_is_read() {
-        let mut disk = config_disk("ORB_TOKEN=secret\n");
-        disk.extend_from_slice(b"ORB_TOKEN=not-this-one\n");
-
-        let parsed = parse_config_disk(&disk).expect("the disk parses");
-
-        assert_eq!(parsed.get("ORB_TOKEN").map(String::as_str), Some("secret"));
+        let mut past_the_block = config_disk("ORB_TOKEN=secret\n");
+        past_the_block.extend_from_slice(b"ORB_TOKEN=not-this-one\n");
+        assert_eq!(
+            parse_config_disk(&past_the_block)
+                .expect("the disk parses")
+                .get("ORB_TOKEN")
+                .map(String::as_str),
+            Some("secret")
+        );
     }
 
     #[test]
     fn a_config_disk_without_a_token_is_refused() {
-        let directory = std::env::temp_dir().join("jorb-init-tests");
-        std::fs::create_dir_all(&directory).unwrap();
+        let directory = test_directory("no-token");
+        let env_path = directory.join("jorb-env");
         let disk_path = directory.join("no-token.cfg");
-        std::fs::write(&disk_path, config_disk("AMP_URL=https://a.test\n")).unwrap();
+        fs::write(&env_path, "PATH=/usr/bin\n").unwrap();
+        fs::write(&disk_path, config_disk("AMP_URL=https://a.test\n")).unwrap();
 
-        let error = environment(Path::new("/nonexistent-env-file"), &disk_path)
+        let error = environment(&env_path, &disk_path)
             .expect_err("a config disk without a token is refused");
 
         assert!(error.to_string().contains("ORB_TOKEN"));
@@ -336,18 +329,15 @@ mod tests {
 
     #[test]
     fn the_config_disk_wins_over_the_image_environment() {
-        let directory = std::env::temp_dir().join("jorb-init-tests");
-        std::fs::create_dir_all(&directory).unwrap();
-
+        let directory = test_directory("precedence");
         let env_path = directory.join("jorb-env");
-        std::fs::write(
+        let disk_path = directory.join("with-token.cfg");
+        fs::write(
             &env_path,
             "AMP_URL=https://image.test\nORB_TOKEN=from-image\n",
         )
         .unwrap();
-
-        let disk_path = directory.join("with-token.cfg");
-        std::fs::write(
+        fs::write(
             &disk_path,
             config_disk("ORB_TOKEN=from-host\nAMP_URL=https://host.test\n"),
         )
@@ -368,5 +358,19 @@ mod tests {
             Some("/home/user")
         );
         assert_eq!(environment.get("USER").map(String::as_str), Some("user"));
+    }
+
+    /// A missing env file means the image is not the one jorb-prepare-image
+    /// made, which jorb-init refuses instead of booting on without a PATH.
+    #[test]
+    fn a_missing_env_file_is_refused() {
+        let directory = test_directory("no-env-file");
+        let disk_path = directory.join("with-token.cfg");
+        fs::write(&disk_path, config_disk("ORB_TOKEN=secret\n")).unwrap();
+
+        let error = environment(&directory.join("not-here"), &disk_path)
+            .expect_err("a missing env file is refused");
+
+        assert!(format!("{error:#}").contains("not-here"));
     }
 }

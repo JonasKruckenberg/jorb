@@ -104,11 +104,23 @@ job() {
 	return "$status"
 }
 
+# The unit an orb runs as, and the units of every orb on the host. The
+# jorb-orb- prefix is what keeps the provider's unit and the gates' own
+# jorb-gate- units out of both answers.
+unit_of() {
+	printf 'jorb-orb-%s.service' "$1"
+}
+
+orb_units() {
+	systemctl list-units --all --plain --no-legend --no-pager 'jorb-orb-*.service' |
+		awk '{print $1}'
+}
+
 # Everything the host knows about an orb, as three words: unit, vm, disk.
 observed() {
 	local orb=$1 unit vm disk
 
-	if systemctl is-active --quiet "jorb-$orb.service"; then
+	if systemctl is-active --quiet "$(unit_of "$orb")"; then
 		unit=active
 	else
 		unit=inactive
@@ -147,10 +159,9 @@ expect_no_debris() {
 	local stray=0
 
 	local units
-	units=$(systemctl list-units --all --plain --no-legend --no-pager 'jorb-*.service' |
-		awk '{print $1}' | grep -v '^jorb-provider.service$' || true)
+	units=$(orb_units)
 	for unit in $units; do
-		local orb=${unit#jorb-}
+		local orb=${unit#jorb-orb-}
 		orb=${orb%.service}
 		if [ "$orb" != "$allowed" ]; then
 			note "a unit is left behind: $unit"
@@ -203,7 +214,7 @@ wait_until_running() {
 wait_until_ready() {
 	local orb=$1 waited=0
 	while [ "$waited" -lt "$boot_deadline" ]; do
-		if journalctl -u "jorb-$orb.service" --no-pager --output cat 2>/dev/null |
+		if journalctl -u "$(unit_of "$orb")" --no-pager --output cat 2>/dev/null |
 			grep -q 'JORB-GATE amp ready'; then
 			return 0
 		fi
@@ -215,15 +226,14 @@ wait_until_ready() {
 }
 
 guest_log() {
-	journalctl -u "jorb-$1.service" --no-pager --output cat 2>/dev/null
+	journalctl -u "$(unit_of "$1")" --no-pager --output cat 2>/dev/null
 }
 
 # Back to nothing: no units, no taps, no sockets, no orb disks. The base
 # image and this run's log stay, because every section needs them.
 wipe_everything() {
 	local units
-	units=$(systemctl list-units --all --plain --no-legend --no-pager 'jorb-*.service' |
-		awk '{print $1}' | grep -v '^jorb-provider.service$' || true)
+	units=$(orb_units)
 	for unit in $units; do
 		systemctl stop "$unit" >/dev/null 2>&1 || true
 	done
@@ -386,11 +396,11 @@ section_3() {
 	wait_until_running "$orb" || true
 
 	local before after
-	before=$(systemctl show -p ActiveEnterTimestampMonotonic --value "jorb-$orb.service")
+	before=$(systemctl show -p ActiveEnterTimestampMonotonic --value "$(unit_of "$orb")")
 	evidence "booted at $before"
 
 	job spawn "$orb" "$token" || note "the identical spawn failed"
-	after=$(systemctl show -p ActiveEnterTimestampMonotonic --value "jorb-$orb.service")
+	after=$(systemctl show -p ActiveEnterTimestampMonotonic --value "$(unit_of "$orb")")
 	evidence "after an identical spawn: $after"
 
 	if [ "$before" != "$after" ]; then
@@ -400,7 +410,7 @@ section_3() {
 	job spawn "$orb" "$token-changed" || note "the spawn with a new token failed"
 	wait_until_running "$orb" || true
 	local restarted
-	restarted=$(systemctl show -p ActiveEnterTimestampMonotonic --value "jorb-$orb.service")
+	restarted=$(systemctl show -p ActiveEnterTimestampMonotonic --value "$(unit_of "$orb")")
 	evidence "after a changed token: $restarted"
 
 	if [ "$restarted" = "$before" ]; then
@@ -455,7 +465,7 @@ section_5() {
 	wait_until_ready "$orb" || true
 
 	local cgroup
-	cgroup=$(systemctl show -p ControlGroup --value "jorb-$orb.service")
+	cgroup=$(systemctl show -p ControlGroup --value "$(unit_of "$orb")")
 
 	local peak=0 waited=0
 	while [ "$waited" -lt 60 ]; do
@@ -526,16 +536,16 @@ section_6() {
 
 	# The failed spawn leaves its unit running on purpose. The next job of any
 	# orb is what removes it.
-	if ! systemctl is-active --quiet "jorb-$orb.service"; then
+	if ! systemctl is-active --quiet "$(unit_of "$orb")"; then
 		evidence "the unit was already gone, so there was nothing to recover"
 	else
-		evidence "the failed spawn left jorb-$orb.service behind, as designed"
+		evidence "the failed spawn left $(unit_of "$orb") behind, as designed"
 	fi
 
 	local other=m6b
 	job pause "$other" || note "the next job (for another orb) failed"
 
-	if systemctl is-active --quiet "jorb-$orb.service"; then
+	if systemctl is-active --quiet "$(unit_of "$orb")"; then
 		note "the next job did not remove the leftover unit"
 	else
 		evidence "the next job removed it"

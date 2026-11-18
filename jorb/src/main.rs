@@ -1,38 +1,38 @@
 //! One Amp orb job: read the environment, take the lock, converge, report.
 //!
 //! An orb's state is two facts, disk exists and VM running, and every
-//! operation is a target state built from four primitives. jorb is crash-only:
-//! the start path is the recovery path, nothing is cleaned up on the way out,
-//! and whatever a killed job left behind is the next job's `recover` to deal
-//! with. That is why nothing below has an error branch that tidies up.
+//! operation is a target state built from four primitives. jorb is crash-only.
+//! The start path is the recovery path, nothing is cleaned up on the way out,
+//! and whatever a killed job left behind belongs to the next job's `recover`.
+//! No error branch below tidies anything up.
 //!
 //! Each primitive checks its own postcondition by looking at the world: the
 //! VMM's own answer, a file, an interface. No primitive trusts another's exit
-//! code, and none of them trusts a predecessor to have left things tidy.
+//! code or expects a predecessor to have left things tidy.
 
+mod host;
 mod job;
 mod limits;
-mod orb;
 
 use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::Parser;
-use jorb_vmm::{Vm, VmBuilder, VmState};
+use jorb_vmm::{VmBuilder, VmState};
 use tokio::process::Command;
 use tokio::time::{sleep, timeout};
 use tracing::{Level, debug, error, info, info_span, instrument};
 
-use crate::job::{Job, Operation, Settings};
-use crate::orb::{ConfigDisk, Paths, Slot, cmdline, unit_name};
+use crate::host::{Slot, cmdline, orb_of_unit, unit_name, unit_pattern};
+use crate::job::{ConfigDisk, Operation, OrbId, Request, Settings};
 
 /// The whole job: parse, lock, observe, converge, report.
 ///
 /// Exit 0 means the operation's postcondition was observed. Anything else
-/// means it was not, which is Amp's signal to retry the job.
+/// means it was not, and tells Amp to retry the job.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -41,26 +41,26 @@ async fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
 
-    let job = match Job::try_parse() {
-        Ok(job) => job,
+    let request = match Request::try_parse() {
+        Ok(request) => request,
         Err(error) => {
-            // clap's own message, as one event rather than on stdout.
+            // clap's own message, as one event instead of on stdout.
             error!(outcome = "rejected", error = error.to_string(), "bad job");
             return ExitCode::FAILURE;
         }
     };
 
-    let span = info_span!("job", op = ?job.operation, orb = %job.orb);
+    let span = info_span!("job", op = ?request.operation, orb = %request.orb);
     let _entered = span.enter();
 
     let started = Instant::now();
-    match converge(&job).await {
-        Ok(outcome) => {
+    match converge(&request).await {
+        Ok(states) => {
             info!(
                 outcome = "ok",
-                state_before = ?outcome.before,
-                state_after = ?outcome.after,
-                changed = outcome.changed,
+                state_before = ?states.before,
+                state_after = ?states.after,
+                changed = states.before != states.after,
                 elapsed_ms = started.elapsed().as_millis(),
                 "job done"
             );
@@ -78,48 +78,49 @@ async fn main() -> ExitCode {
     }
 }
 
-/// What the job found and what it left behind, for the closing event.
+/// What the job found and what it left behind, for the closing event. Two
+/// values of one type, named so they cannot be swapped.
 #[derive(Debug)]
-struct Outcome {
+struct Transition {
     before: VmState,
     after: VmState,
-    changed: bool,
 }
 
 /// Holds the lock for the whole job, then runs recover and the operation
 /// inside the deadline.
 ///
-/// The deadline is below Amp's five minutes on purpose: a job that is still
-/// running when Amp gives up would be a second job against the same orb.
-async fn converge(job: &Job) -> Result<Outcome> {
-    let paths = Paths::new(&job.settings, &job.orb);
+/// The deadline sits below Amp's five minutes: a job still running when Amp
+/// gives up would become a second job against the same orb.
+async fn converge(request: &Request) -> Result<Transition> {
+    let settings = &request.settings;
+    let orb = &request.orb;
 
-    std::fs::create_dir_all(paths.disks_directory())
-        .with_context(|| format!("creating {}", paths.disks_directory().display()))?;
-    std::fs::create_dir_all(&job.settings.run_dir)
-        .with_context(|| format!("creating {}", job.settings.run_dir.display()))?;
+    for directory in [host::disks_directory(settings), settings.run_dir.clone()] {
+        std::fs::create_dir_all(&directory)
+            .with_context(|| format!("creating {}", directory.display()))?;
+    }
 
-    let _lock = take_lock(&paths.lock).await?;
+    let _lock = take_lock(&host::lock(settings)).await?;
 
     timeout(limits::JOB_DEADLINE, async {
-        recover(&job.settings).await?;
+        recover(settings).await?;
 
-        let before = observe(&paths).await?;
-        match job.operation {
-            Operation::Spawn => spawn(job, &paths).await?,
-            Operation::Pause => stop(&job.orb, &paths).await?,
+        // Recover has just stopped every unit whose VM was not running, so
+        // under the lock this is either Running or Absent.
+        let before = observe(settings, orb).await?;
+
+        match request.operation {
+            Operation::Spawn => spawn(request, before).await?,
+            Operation::Pause => stop(settings, orb).await?,
             Operation::Delete => {
-                stop(&job.orb, &paths).await?;
-                remove_disk(&paths).await?;
+                stop(settings, orb).await?;
+                remove_disk(settings, orb).await?;
             }
         }
-        let after = observe(&paths).await?;
 
-        Ok(Outcome {
-            before,
-            after,
-            changed: before != after,
-        })
+        let after = observe(settings, orb).await?;
+
+        Ok(Transition { before, after })
     })
     .await
     .with_context(|| format!("the job did not finish within {:?}", limits::JOB_DEADLINE))?
@@ -127,9 +128,9 @@ async fn converge(job: &Job) -> Result<Outcome> {
 
 /// The one lock, held for the whole job, so no two jobs interleave.
 ///
-/// Waiting is bounded: the other holder has the same deadline, so a lock that
-/// is still held after that long is a stuck job rather than a busy one, and
-/// failing here lets Amp retry.
+/// The wait is bounded. Every holder has the same job deadline, so a lock held
+/// for longer belongs to a stuck job, and failing here lets Amp retry instead
+/// of piling jobs up behind it.
 async fn take_lock(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .create(true)
@@ -160,25 +161,21 @@ async fn take_lock(path: &Path) -> Result<File> {
     }
 }
 
-/// What the VMM behind this orb's socket says about it. `Absent` covers both
-/// "no socket" and "a socket nothing is listening on".
-#[instrument(skip_all)]
-async fn observe(paths: &Paths) -> Result<VmState> {
-    match Vm::attach(&paths.api_socket).await? {
-        Some(vm) => Ok(vm.state().await?),
-        None => Ok(VmState::Absent),
-    }
+/// What the VMM behind this orb's socket says about it.
+async fn observe(settings: &Settings, orb: &OrbId) -> Result<VmState> {
+    Ok(jorb_vmm::state(&host::api_socket(settings, orb)).await?)
 }
 
-/// Stops every `jorb-*` unit whose VM is not running, whichever orb it belongs
-/// to.
+/// Stops every orb unit whose VM is not running, whichever orb it belongs to.
 ///
-/// Under the lock no job is mid-start, so such a unit is debris from a job
-/// that died. This is what frees a slot a half-started VM is holding.
+/// Under the lock no job is mid-start, so such a unit is debris from a job that
+/// died, and stopping it frees the slot its half-started VM was holding. Only
+/// an orb's unit matches the pattern, so the provider's own unit and everything
+/// else on the host are out of reach here.
 #[instrument(skip_all)]
 async fn recover(settings: &Settings) -> Result<()> {
-    let units = jorb_units().await?;
-    debug!(count = units.len(), "units in the slice");
+    let units = orb_units().await?;
+    debug!(count = units.len(), "orb units");
 
     for unit in units {
         let Some(orb) = orb_of_unit(&unit) else {
@@ -186,24 +183,13 @@ async fn recover(settings: &Settings) -> Result<()> {
             continue;
         };
 
-        // The name alone is not enough: jorb-provider.service matches the
-        // pattern and would parse as an orb called "provider". An orb's unit
-        // is one in jorb.slice, and the provider is not.
-        let slice = unit_slice(&unit).await?;
-        if slice != limits::SLICE {
-            debug!(unit = %unit, slice = %slice, "not in the slice; leaving it alone");
-            continue;
-        }
-
-        let paths = Paths::new(settings, &orb);
-        let state = observe(&paths).await?;
-
+        let state = observe(settings, &orb).await?;
         if state == VmState::Running {
             continue;
         }
 
         info!(orb = %orb, state = ?state, "stopping a unit whose VM is not running");
-        stop(&orb, &paths).await?;
+        stop(settings, &orb).await?;
     }
 
     Ok(())
@@ -211,7 +197,7 @@ async fn recover(settings: &Settings) -> Result<()> {
 
 /// The units systemd knows about for this host's orbs, bounded by the number
 /// of slots a host can have.
-async fn jorb_units() -> Result<Vec<String>> {
+async fn orb_units() -> Result<Vec<String>> {
     let listed = run(
         limits::SYSTEMCTL,
         &[
@@ -220,7 +206,7 @@ async fn jorb_units() -> Result<Vec<String>> {
             "--plain",
             "--no-legend",
             "--no-pager",
-            limits::UNIT_PATTERN,
+            &unit_pattern(),
         ],
     )
     .await?;
@@ -228,48 +214,26 @@ async fn jorb_units() -> Result<Vec<String>> {
     Ok(listed
         .lines()
         .filter_map(|line| line.split_whitespace().next())
-        .filter(|unit| unit.ends_with(".service"))
+        .filter(|unit| unit.ends_with(limits::UNIT_SUFFIX))
         .take(limits::MAX_UNITS_TO_RECOVER)
         .map(str::to_owned)
         .collect())
 }
 
-/// The slice a unit runs in, which is how an orb's unit is told from the
-/// provider's.
-async fn unit_slice(unit: &str) -> Result<String> {
-    let slice = run_allowing_failure(limits::SYSTEMCTL, &["show", "-p", "Slice", "--value", unit])
-        .await?
-        .trim()
-        .to_owned();
-
-    Ok(slice)
-}
-
-/// The orb a unit belongs to, or `None` when the name is not one of ours.
-/// Reparsing the id puts it through the same rules as the one Amp sent.
-fn orb_of_unit(unit: &str) -> Option<job::OrbId> {
-    unit.strip_prefix(limits::UNIT_PREFIX)
-        .and_then(|rest| rest.strip_suffix(".service"))
-        .and_then(|id| id.parse().ok())
-}
-
 /// Stops an orb's unit and takes its socket away.
 ///
-/// The postcondition is systemd's own answer, not the exit code of the stop:
-/// a unit that was already gone and a unit that had to be killed look the
-/// same from here, which is what makes this safe to repeat.
+/// The postcondition is systemd's own answer, not the exit code of the stop. A
+/// unit that was already gone and a unit that had to be killed look the same
+/// from here, so repeating this is safe.
 #[instrument(skip_all, fields(orb = %orb))]
-async fn stop(orb: &job::OrbId, paths: &Paths) -> Result<()> {
+async fn stop(settings: &Settings, orb: &OrbId) -> Result<()> {
     let unit = unit_name(orb);
 
     // --no-block would leave the postcondition to a race; this waits.
     let _ = run(limits::SYSTEMCTL, &["--no-ask-password", "stop", &unit]).await;
 
     let deadline = Instant::now() + limits::UNIT_GONE_WAIT;
-    loop {
-        if !unit_is_active(&unit).await? {
-            break;
-        }
+    while unit_is_active(&unit).await? {
         ensure!(
             Instant::now() < deadline,
             "{unit} was still active {:?} after being stopped",
@@ -278,15 +242,20 @@ async fn stop(orb: &job::OrbId, paths: &Paths) -> Result<()> {
         sleep(limits::UNIT_GONE_POLL).await;
     }
 
-    remove_if_present(&paths.api_socket)?;
+    remove_if_present(&host::api_socket(settings, orb))?;
 
     Ok(())
 }
 
-/// systemd's view of a unit. `is-active` exits non-zero for everything that is
-/// not running, which is exactly the question being asked.
+/// systemd's view of a unit. `show` also answers for a unit it has never heard
+/// of, calling it inactive, so a unit `--collect` has already taken away needs
+/// no special case.
 async fn unit_is_active(unit: &str) -> Result<bool> {
-    let state = run_allowing_failure(limits::SYSTEMCTL, &["is-active", unit]).await?;
+    let state = run(
+        limits::SYSTEMCTL,
+        &["show", "--property=ActiveState", "--value", unit],
+    )
+    .await?;
 
     Ok(matches!(
         state.trim(),
@@ -296,79 +265,73 @@ async fn unit_is_active(unit: &str) -> Result<bool> {
 
 /// Gives the orb a disk if it has none, by cloning the base image.
 ///
-/// Written to a partial name and renamed, so a kill in the middle leaves
-/// either no disk or a whole one. The partial name is truncated on entry
-/// rather than trusted to be absent.
+/// The clone is written to a partial name and renamed, so a kill in the middle
+/// leaves either no disk or a whole one. The partial name is truncated on
+/// entry instead of being trusted to be absent.
 #[instrument(skip_all)]
-async fn ensure_disk(paths: &Paths) -> Result<()> {
-    if paths.disk.try_exists()? {
+async fn ensure_disk(settings: &Settings, orb: &OrbId) -> Result<()> {
+    let disk = host::disk(settings, orb);
+    if disk.try_exists()? {
         debug!("the disk is already there");
         return Ok(());
     }
 
-    let base = File::open(&paths.base_image).with_context(|| {
+    let image = host::base_image(settings);
+    let base = File::open(&image).with_context(|| {
         format!(
             "opening the base image at {}; has jorb-prepare-image run?",
-            paths.base_image.display()
+            image.display()
         )
     })?;
 
+    let partial_path = host::partial_disk(settings);
     let partial = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
-        .open(&paths.partial_disk)
-        .with_context(|| format!("creating {}", paths.partial_disk.display()))?;
+        .open(&partial_path)
+        .with_context(|| format!("creating {}", partial_path.display()))?;
 
-    // A reflink, so a 64 GiB disk costs what the orb writes to it. XFS is
-    // what makes this possible, which is why G3 checks for it.
-    rustix::fs::ioctl_ficlone(&partial, &base).with_context(|| {
-        format!(
-            "reflinking {} to {}",
-            paths.base_image.display(),
-            paths.partial_disk.display()
-        )
-    })?;
-
+    // A reflink, so a 64 GiB disk costs what the orb writes to it. XFS is what
+    // makes this possible, which is why G3 checks for it.
+    rustix::fs::ioctl_ficlone(&partial, &base)
+        .with_context(|| format!("reflinking the base image to {}", partial_path.display()))?;
     partial
         .sync_all()
-        .with_context(|| format!("flushing {}", paths.partial_disk.display()))?;
+        .with_context(|| format!("flushing {}", partial_path.display()))?;
     drop(partial);
 
-    std::fs::rename(&paths.partial_disk, &paths.disk).with_context(|| {
-        format!(
-            "renaming {} to {}",
-            paths.partial_disk.display(),
-            paths.disk.display()
-        )
-    })?;
+    std::fs::rename(&partial_path, &disk)
+        .with_context(|| format!("renaming the partial disk to {}", disk.display()))?;
 
-    // The rename itself has to survive a power cut, which means fsyncing the
+    // The rename has to survive a power cut too, which means fsyncing the
     // directory that holds the name.
-    let directory = File::open(paths.disks_directory())?;
-    rustix::fs::fsync(&directory)
-        .with_context(|| format!("flushing {}", paths.disks_directory().display()))?;
+    let directory = host::disks_directory(settings);
+    rustix::fs::fsync(&File::open(&directory)?)
+        .with_context(|| format!("flushing {}", directory.display()))?;
 
     ensure!(
-        paths.disk.try_exists()?,
+        disk.try_exists()?,
         "the disk at {} is not there after being created",
-        paths.disk.display()
+        disk.display()
     );
-    info!(disk = %paths.disk.display(), "disk cloned from the base image");
+    info!(disk = %disk.display(), "disk cloned from the base image");
 
     Ok(())
 }
 
 /// Takes the orb's disk and its config disk away. Repeating this is a no-op.
 #[instrument(skip_all)]
-async fn remove_disk(paths: &Paths) -> Result<()> {
-    remove_if_present(&paths.disk)?;
-    remove_if_present(&paths.config_disk)?;
+async fn remove_disk(settings: &Settings, orb: &OrbId) -> Result<()> {
+    let disk = host::disk(settings, orb);
+
+    remove_if_present(&disk)?;
+    remove_if_present(&host::config_disk(settings, orb))?;
 
     ensure!(
-        !paths.disk.try_exists()?,
+        !disk.try_exists()?,
         "the disk at {} is still there after being removed",
-        paths.disk.display()
+        disk.display()
     );
 
     Ok(())
@@ -376,30 +339,35 @@ async fn remove_disk(paths: &Paths) -> Result<()> {
 
 /// Spawn: leave a healthy orb alone, otherwise start it from where it is.
 ///
-/// "Healthy" is a running VM with a byte-identical config disk. A changed
-/// token means the old VM cannot talk to Amp any more, so it is stopped and
-/// started again with the new one.
+/// Healthy means a running VM with a byte-identical config disk. A changed
+/// token leaves the old VM unable to talk to Amp, so it is stopped and started
+/// again with the new one. `state` is the observation converge made under the
+/// same lock, so the VMM is not asked twice.
 #[instrument(skip_all)]
-async fn spawn(job: &Job, paths: &Paths) -> Result<()> {
-    let wanted = ConfigDisk::new(job.token.as_ref(), job.amp_url.as_deref())?.encode()?;
+async fn spawn(request: &Request, state: VmState) -> Result<()> {
+    let settings = &request.settings;
+    let orb = &request.orb;
+    let config_disk = ConfigDisk::new(request.token.as_ref(), request.amp_url.as_deref())?;
 
-    if observe(paths).await? == VmState::Running && config_disk_is(&paths.config_disk, &wanted)? {
+    if state == VmState::Running
+        && config_disk_says(&host::config_disk(settings, orb), &config_disk)?
+    {
         info!("already running with this config; leaving it alone");
         return Ok(());
     }
 
-    stop(&job.orb, paths).await?;
-    ensure_disk(paths).await?;
-    start(job, paths, &wanted).await
+    stop(settings, orb).await?;
+    ensure_disk(settings, orb).await?;
+    start(request, &config_disk).await
 }
 
 /// Whether the config disk on this host already says exactly this.
 ///
-/// Byte equality, which is what the fixed size of the config disk is for. The
+/// Byte equality, which is what the config disk's fixed size is for. The
 /// contents are never logged: one of the values is the token.
-fn config_disk_is(path: &Path, wanted: &[u8]) -> Result<bool> {
+fn config_disk_says(path: &Path, wanted: &ConfigDisk) -> Result<bool> {
     match std::fs::read(path) {
-        Ok(existing) => Ok(existing == wanted),
+        Ok(existing) => Ok(existing == wanted.as_bytes()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
     }
@@ -408,16 +376,21 @@ fn config_disk_is(path: &Path, wanted: &[u8]) -> Result<bool> {
 /// Starts the orb: config disk, slot, unit, VM.
 ///
 /// Nothing is undone if any of this fails. The unit, the socket and the tap
-/// that are left behind are what the next job's `recover` is for, and trying
-/// to tidy up here would be a second path that a kill skips anyway.
-#[instrument(skip_all, fields(orb = %job.orb))]
-async fn start(job: &Job, paths: &Paths, config_disk: &[u8]) -> Result<()> {
-    // Preconditions this primitive establishes for itself.
-    remove_if_present(&paths.api_socket)?;
-    write_config_disk(&paths.config_disk, config_disk)?;
+/// left behind are what the next job's `recover` is for; tidying up here would
+/// be a second path that a kill skips anyway.
+#[instrument(skip_all, fields(orb = %request.orb, slot = tracing::field::Empty))]
+async fn start(request: &Request, config_disk: &ConfigDisk) -> Result<()> {
+    let settings = &request.settings;
+    let orb = &request.orb;
+    let socket = host::api_socket(settings, orb);
+    let config_disk_path = host::config_disk(settings, orb);
 
-    let slot = lowest_free_slot(&job.settings)?;
-    let unit = unit_name(&job.orb);
+    // Preconditions this primitive establishes for itself.
+    remove_if_present(&socket)?;
+    write_config_disk(&config_disk_path, config_disk)?;
+
+    let slot = lowest_free_slot(settings)?;
+    let unit = unit_name(orb);
     tracing::Span::current().record("slot", slot.index());
     info!(slot = slot.index(), unit = %unit, "starting");
 
@@ -428,39 +401,38 @@ async fn start(job: &Job, paths: &Paths, config_disk: &[u8]) -> Result<()> {
             "--collect",
             &format!("--unit={unit}"),
             &format!("--slice={}", limits::SLICE),
-            "-p",
-            "Type=exec",
-            "-p",
-            &format!("TimeoutStopSec={}", limits::UNIT_STOP_TIMEOUT.as_secs()),
-            "-p",
-            "OOMScoreAdjust=500",
+            "--property=Type=exec",
+            "--property=OOMScoreAdjust=500",
+            &format!(
+                "--property=TimeoutStopSec={}",
+                limits::UNIT_STOP_TIMEOUT.as_secs()
+            ),
             "--",
-            &job.settings.cloud_hypervisor.to_string_lossy(),
-            "--api-socket",
-            &paths.api_socket.to_string_lossy(),
+            &settings.cloud_hypervisor.to_string_lossy(),
+            &format!("--api-socket={}", socket.display()),
         ],
     )
     .await
     .with_context(|| format!("starting {unit}"))?;
 
-    wait_for_socket(&paths.api_socket).await?;
+    wait_for_socket(&socket).await?;
 
-    let vm = VmBuilder::new(
-        &job.settings.kernel,
-        &cmdline(slot, &job.orb),
-        job.settings.vcpus,
-        job.settings.memory_mib,
+    VmBuilder::new(
+        &settings.kernel,
+        &cmdline(slot, orb),
+        settings.vcpus,
+        settings.memory_mib,
     )
     .without_huge_pages()
-    .disk(&paths.disk)
-    .read_only_disk(&paths.config_disk)
-    .tap(&slot.tap_name(), slot.host_address(), slot.netmask())
+    .disk(&host::disk(settings, orb))
+    .read_only_disk(&config_disk_path)
+    .tap(&slot.tap_name(), slot.host_address(), limits::GUEST_NETMASK)
     .free_page_reporting()
-    .boot(&paths.api_socket)
+    .boot(&socket)
     .await
     .context("creating and booting the VM")?;
 
-    let state = vm.state().await?;
+    let state = observe(settings, orb).await?;
     ensure!(
         state == VmState::Running,
         "the VM is {state:?} rather than running after being booted"
@@ -472,7 +444,7 @@ async fn start(job: &Job, paths: &Paths, config_disk: &[u8]) -> Result<()> {
 
 /// The config disk, written where only root can read it. The run directory is
 /// a tmpfs, so the token never reaches a disk that survives a reboot.
-fn write_config_disk(path: &Path, contents: &[u8]) -> Result<()> {
+fn write_config_disk(path: &Path, config_disk: &ConfigDisk) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -484,7 +456,7 @@ fn write_config_disk(path: &Path, contents: &[u8]) -> Result<()> {
         .open(path)
         .with_context(|| format!("creating {}", path.display()))?;
 
-    file.write_all(contents)
+    file.write_all(config_disk.as_bytes())
         .with_context(|| format!("writing {}", path.display()))?;
     file.sync_all()
         .with_context(|| format!("flushing {}", path.display()))?;
@@ -498,19 +470,17 @@ fn write_config_disk(path: &Path, contents: &[u8]) -> Result<()> {
 /// it on boot and it goes away with the process, so there is no counter to get
 /// out of step with reality. No free slot is the host's capacity error.
 fn lowest_free_slot(settings: &Settings) -> Result<Slot> {
-    let slots = settings.slots.get().min(limits::MAX_SLOTS);
+    let slots = usize::from(settings.slots.get()).min(limits::MAX_SLOTS);
 
-    for index in 0..slots {
-        let slot = Slot::new(u8::try_from(index).context("a slot index past 255")?);
-        if !Path::new(limits::SYS_CLASS_NET)
-            .join(slot.tap_name())
-            .exists()
-        {
-            return Ok(slot);
-        }
-    }
-
-    bail!("no free slot: all {slots} are taken");
+    (0..=u8::MAX)
+        .take(slots)
+        .map(Slot::new)
+        .find(|slot| {
+            !Path::new(limits::SYS_CLASS_NET)
+                .join(slot.tap_name())
+                .exists()
+        })
+        .with_context(|| format!("no free slot: all {slots} are taken"))
 }
 
 /// Waits for Cloud Hypervisor to open its API socket.
@@ -543,30 +513,9 @@ fn remove_if_present(path: &Path) -> Result<()> {
 /// Runs a program and gives back its stdout, failing if it does.
 ///
 /// Arguments are passed as arguments: nothing jorb runs goes through a shell,
-/// because `ORB_ID` reaches some of them.
+/// because `ORB_ID` reaches some of them. Every caller wants a program that
+/// succeeded, so there is one way to run one.
 async fn run(program: &str, arguments: &[&str]) -> Result<String> {
-    let (status, stdout, stderr) = run_to_completion(program, arguments).await?;
-
-    ensure!(
-        status.success(),
-        "{program} exited with {status}: {}",
-        stderr.trim()
-    );
-
-    Ok(stdout)
-}
-
-/// Runs a program whose non-zero exit is an answer rather than a failure.
-async fn run_allowing_failure(program: &str, arguments: &[&str]) -> Result<String> {
-    let (_, stdout, _) = run_to_completion(program, arguments).await?;
-
-    Ok(stdout)
-}
-
-async fn run_to_completion(
-    program: &str,
-    arguments: &[&str],
-) -> Result<(std::process::ExitStatus, String, String)> {
     debug!(program, ?arguments, "running");
 
     let output = timeout(
@@ -582,84 +531,50 @@ async fn run_to_completion(
     })?
     .with_context(|| format!("running {program}"))?;
 
-    Ok((
+    ensure!(
+        output.status.success(),
+        "{program} exited with {}: {}",
         output.status,
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    ))
-}
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
-/// Stops the deadline from being mistaken for Amp's: ours has to be shorter.
-const _: () = assert!(limits::JOB_DEADLINE.as_secs() < Duration::from_secs(300).as_secs());
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_units_orb_is_the_name_between_the_prefix_and_the_suffix() {
-        assert_eq!(
-            orb_of_unit("jorb-amp-1.service").map(|orb| orb.to_string()),
-            Some("amp-1".to_owned())
-        );
-    }
-
-    #[test]
-    fn a_unit_that_is_not_ours_belongs_to_no_orb() {
-        for unit in [
-            "sshd.service",
-            "jorb-.service",
-            "jorb-amp-1.slice",
-            "jorb-../x.service",
-            "jorb-a b.service",
-        ] {
-            assert!(
-                orb_of_unit(unit).is_none(),
-                "{unit} should not parse as an orb's unit"
-            );
-        }
-    }
-
-    /// The provider's own unit parses as an orb called "provider", which is
-    /// why recover asks systemd for the slice as well as reading the name.
-    #[test]
-    fn the_providers_unit_parses_as_a_name_and_is_kept_out_by_its_slice() {
-        assert_eq!(
-            orb_of_unit("jorb-provider.service").map(|orb| orb.to_string()),
-            Some("provider".to_owned())
-        );
-    }
-
-    #[test]
-    fn a_config_disk_that_is_not_there_does_not_match() {
-        let missing = Path::new("/run/jorb/definitely-not-here.cfg");
-
-        assert!(!config_disk_is(missing, b"ORB_TOKEN=x\n").unwrap());
+    /// A directory of this test's own, so two tests cannot tread on each
+    /// other's files.
+    fn test_directory(name: &str) -> std::path::PathBuf {
+        let directory = std::env::temp_dir().join("jorb-tests").join(name);
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
     }
 
     #[test]
     fn a_config_disk_matches_only_its_own_bytes() {
-        let directory = std::env::temp_dir().join("jorb-tests");
-        std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("match.cfg");
+        let path = test_directory("config-disk").join("orb.cfg");
+        let wanted = ConfigDisk::new(Some(&"a-token".into()), None).unwrap();
+        let other = ConfigDisk::new(Some(&"another-token".into()), None).unwrap();
 
-        let wanted = ConfigDisk::new(Some(&"a-token".into()), None)
-            .unwrap()
-            .encode()
-            .unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(
+            !config_disk_says(&path, &wanted).unwrap(),
+            "a config disk that is not there cannot match"
+        );
+
         write_config_disk(&path, &wanted).unwrap();
 
-        assert!(config_disk_is(&path, &wanted).unwrap());
-
-        let other = ConfigDisk::new(Some(&"another-token".into()), None)
-            .unwrap()
-            .encode()
-            .unwrap();
-        assert!(!config_disk_is(&path, &other).unwrap());
+        assert!(config_disk_says(&path, &wanted).unwrap());
+        assert!(!config_disk_says(&path, &other).unwrap());
     }
 
     #[test]
     fn removing_a_path_that_is_not_there_is_not_a_failure() {
-        assert!(remove_if_present(Path::new("/run/jorb/not-here-either.sock")).is_ok());
+        let path = test_directory("removal").join("not-here");
+
+        assert!(remove_if_present(&path).is_ok());
     }
 }

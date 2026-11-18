@@ -251,9 +251,9 @@ in
         '';
       };
 
-      # Explicitly in system.slice: jorb's recover stops units in jorb.slice
-      # whose VM is not running, and the provider's own unit name matches the
-      # pattern it looks for.
+      # Explicitly in system.slice, so the MemoryHigh on jorb.slice bounds the
+      # orbs and not the provider that starts them. Recover cannot reach this
+      # unit either way: its name is outside jorb-orb-*.
       systemd.services.jorb-provider = {
         description = "Amp orb provider";
         wantedBy = [ "multi-user.target" ];

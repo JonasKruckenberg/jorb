@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
          ip=10.77.{slot}.2::10.77.{slot}.1:255.255.255.252:boot-example:eth0:off:1.1.1.1:9.9.9.9"
     );
 
-    let vm = VmBuilder::new(
+    VmBuilder::new(
         Path::new(kernel),
         &cmdline,
         NonZeroU8::new(4).ok_or("four is not zero")?,
@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .boot(socket)
     .await?;
 
-    println!("{:?}", vm.state().await?);
+    println!("{:?}", jorb_vmm::state(socket).await?);
 
     Ok(())
 }

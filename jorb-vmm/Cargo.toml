@@ -13,7 +13,11 @@ reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
 serde = "1.0.229"
 serde_json = "1.0.154"
 thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["rt", "macros", "time"] }
+
+# Only the tests and the boot example need a runtime: nothing in the library
+# itself does.
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["rt", "macros"] }
 
 [build-dependencies]
 openapiv3 = "2.2.0"

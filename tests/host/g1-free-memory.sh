@@ -18,7 +18,7 @@ recommended_kib=$((available_kib - headroom_kib))
 evidence "MemTotal      $((total_kib / 1024)) MiB"
 evidence "MemAvailable  $((available_kib / 1024)) MiB"
 evidence "headroom      $((headroom_kib / 1024)) MiB"
-evidence "running units in jorb.slice: $(systemctl list-units 'jorb-*' --no-legend --plain 2>/dev/null | wc -l)"
+evidence "running units in jorb.slice: $(systemctl list-units 'jorb-orb-*.service' --no-legend --plain 2>/dev/null | wc -l)"
 evidence "zram: $(test -e /sys/block/zram0/disksize && cat /sys/block/zram0/disksize || echo absent)"
 
 if [ "$recommended_kib" -le 0 ]; then

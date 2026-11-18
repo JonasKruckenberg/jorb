@@ -56,19 +56,20 @@ Each is resolved by a gate in T3. Until then, code that depends on one carries `
 
 ## Milestone 2: components
 
-### T4. `jorb-vmm` API
+- **Deliver:** `VmBuilder` (kernel, cmdline, cpus, memory, `without_huge_pages`, `disk`, `read_only_disk`, `tap`, `free_page_reporting`, serial to stdout) with `async fn boot(self, socket) -> Result<()>` performing create then boot; `state(socket) -> Result<VmState>` answering `Absent` for a socket that is gone, dead or has no VM; a `thiserror` error enum; an `API_REQUEST_TIMEOUT` in `limits.rs` applied to every request. An API socket is the only name for a VM; there is no handle type. Nothing from the generated module is re-exported.
 - **Deliver:** `VmBuilder` (kernel, cmdline, cpus, memory, `without_huge_pages`, `disk`, `read_only_disk`, `tap`, `free_page_reporting`, serial to stdout) with `async fn boot(self, socket) -> Result<Vm>` performing create then boot; `Vm::attach(socket) -> Result<Option<Vm>>` (None when the socket is absent or refuses); `vm.state()`; a `thiserror` error enum; an `API_REQUEST_TIMEOUT` in `limits.rs` applied to every request. Nothing from the generated module is re-exported.
 - **Accept:** golden test comparing the builder's JSON for the fixed VM shape against a checked-in file; a `//!` paragraph on the crate root stating what the crate refuses to know; `[host]` example boots the G4 image.
 
 Illustrative shape, not a specification:
 
 ```rust
-let vm = VmBuilder::new(kernel, cmdline)
+VmBuilder::new(kernel, cmdline)
     .cpus(4).memory_mib(6144).without_huge_pages()
     .disk(root_disk).read_only_disk(config_disk)
-    .tap(slot.tap_name(), slot.host_addr(), slot.netmask())
+    .tap(slot.tap_name(), slot.host_address(), GUEST_NETMASK)
     .free_page_reporting()
     .boot(&socket).await?;
+let running = jorb_vmm::state(&socket).await? == VmState::Running;
 ```
 
 ### T5. `jorb-init`
@@ -80,20 +81,20 @@ let vm = VmBuilder::new(kernel, cmdline)
 - **Accept:** shellcheck clean; `[host]` produces `/var/lib/jorb/base.raw`, and `debugfs` shows `/jorb-init`, `/etc/jorb-env`, and setuid bit intact on `sudo`.
 
 ### T7. `jorb` types and pure functions
-- **Deliver:** `OrbId`, `Operation`, `Job` (from `clap` with `env`), `Settings` (`JORB_*`), `Slot` with address functions, `ConfigDisk::encode`, `cmdline(slot, id)`.
+- **Deliver:** `OrbId`, `Operation`, `Request` (from `clap` with `env`), `Settings` (`JORB_*`), `Slot` with address functions, `ConfigDisk`, `cmdline(slot, id)`.
 - **Accept:** unit tests including rejections: empty id, 65 characters, leading `-`, `../x`, a dot, a slash, newline or NUL in a token; address math for slots 0 and 255; cmdline golden string.
 
 ### T8. `jorb` primitives and operations
 - **Deliver:**
-  - `recover`: list `jorb-*` units (bounded by a named limit); stop each whose VM is not `Running` via `Vm::attach`. Runs first in every job.
+  - `recover`: list `jorb-orb-*` units (bounded by a named limit); stop each whose VM is not `Running` via `state(socket)`. Runs first in every job.
   - `stop`: `systemctl stop`; postcondition unit inactive; remove the socket.
   - `ensure_disk`: if absent, reflink base to `disks/.tmp`, fsync file, rename, fsync directory.
   - `remove_disk`: unlink if present; remove the config file.
-  - `start`: remove any stale socket; write the config disk; pick the lowest free slot; `systemd-run --collect --unit jorb-<id> --slice jorb.slice -p Type=exec -p TimeoutStopSec=5 -p OOMScoreAdjust=500` running Cloud Hypervisor with the API socket; wait up to `API_SOCKET_WAIT` for the socket; `VmBuilder::boot`; postcondition `state == Running`. On failure, return the error and clean nothing up; the next job's `recover` removes the debris.
+  - `start`: remove any stale socket; write the config disk; pick the lowest free slot; `systemd-run --collect --unit jorb-orb-<id> --slice jorb.slice -p Type=exec -p TimeoutStopSec=5 -p OOMScoreAdjust=500` running Cloud Hypervisor with the API socket; wait up to `API_SOCKET_WAIT` for the socket; `VmBuilder::boot`; postcondition `state == Running`. On failure, return the error and clean nothing up; the next job's `recover` removes the debris.
   - Operations as the compositions in `AGENTS.md`; `main` takes the lock, opens the root span, runs `recover` then the operation under `JOB_DEADLINE`, maps the result to the exit code.
   - `limits.rs` holding every size, count and duration used above (the `5` in the `systemd-run` line is `UNIT_STOP_TIMEOUT`); each subprocess runs under a timeout.
 - **Logging:** root span `job` with `op` and `orb`; one `#[instrument]` span per primitive (skip secrets); a final event with `outcome`, `state_before`, `state_after`.
-- **Accept:** clippy and tests pass; a test proves the token never appears in `Debug` or log output of `Job`; behaviour is verified in T11.
+- **Accept:** clippy and tests pass; a test proves the token never appears in `Debug` or log output of `Request`; behaviour is verified in T11.
 
 ## Milestone 3: host integration
 
@@ -135,4 +136,4 @@ let vm = VmBuilder::new(kernel, cmdline)
 
 ## Deferred: do not build
 
-In likely order: guest memory line on the console; a second slot; snapshots (`ORB_SNAPSHOT_ID`); graceful stop (power button plus an init handler; it adds a second shutdown path, so weigh it against the failure model before building); `ORB_TYPE` sizes; RAM snapshots; ZFS. The places to extend already exist (`ConfigDisk` keys, methods on `Vm`, a second clone source in `ensure_disk`); do not build ahead of them.
+In likely order: guest memory line on the console; a second slot; snapshots (`ORB_SNAPSHOT_ID`); graceful stop (power button plus an init handler; it adds a second shutdown path, so weigh it against the failure model before building); `ORB_TYPE` sizes; RAM snapshots; ZFS. The places to extend already exist (`ConfigDisk` keys, new methods in `jorb-vmm`, a second clone source in `ensure_disk`); do not build ahead of them.

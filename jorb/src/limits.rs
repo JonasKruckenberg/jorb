@@ -1,6 +1,7 @@
 //! Every bound, size, duration and fixed path jorb uses, with the reason for
 //! its value. Nothing elsewhere in the crate writes a bare number.
 
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 /// The longest orb id. The regex in AGENTS.md allows 64 characters, and the
@@ -10,7 +11,7 @@ pub const MAX_ORB_ID_LEN: usize = 64;
 
 /// How many slots a host may have. One slot is one `10.77.S.0/30`, and S is a
 /// byte of the address.
-pub const MAX_SLOTS: u16 = 256;
+pub const MAX_SLOTS: usize = 256;
 
 /// The config disk's size, which both ends agree on: jorb pads to it and
 /// jorb-init reads it. One block holds the two keys v1 has many times over,
@@ -34,9 +35,16 @@ pub const LOCK: &str = "lock";
 /// points this at something else.
 pub const CLOUD_HYPERVISOR: &str = "cloud-hypervisor";
 
-/// Units are `jorb-<id>.service`, which is also the pattern recover lists.
-pub const UNIT_PREFIX: &str = "jorb-";
-pub const UNIT_PATTERN: &str = "jorb-*.service";
+/// Orb units are `jorb-orb-<id>.service`, and these two are the whole naming
+/// rule: `host::unit_name` builds one, `host::orb_of_unit` reads one back and
+/// `host::unit_pattern` is what recover lists.
+///
+/// The prefix is `jorb-orb-` rather than `jorb-` so that no other unit on the
+/// host can be mistaken for an orb's. `jorb-provider.service` is the one that
+/// used to be: it matched `jorb-*.service` and parsed as an orb called
+/// "provider".
+pub const UNIT_PREFIX: &str = "jorb-orb-";
+pub const UNIT_SUFFIX: &str = ".service";
 
 /// The slice every orb runs in, so one `MemoryHigh` covers all of them.
 pub const SLICE: &str = "jorb.slice";
@@ -49,6 +57,10 @@ pub const GUEST_INIT: &str = "/jorb-init";
 
 /// The guest's one interface, configured by the kernel from `ip=`.
 pub const GUEST_INTERFACE: &str = "eth0";
+
+/// A slot's network is a /30: the host's address, the guest's, and nothing
+/// else. It is the same mask for every slot.
+pub const GUEST_NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 252);
 
 /// The guest's serial console, which carries its output to the host's
 /// journal. The two architectures name the same thing differently.
@@ -65,12 +77,17 @@ pub const CONSOLE_DEVICE: &str = "ttyS0";
 pub const PRIMARY_DNS: &str = "1.1.1.1";
 pub const SECONDARY_DNS: &str = "9.9.9.9";
 
+/// How long Amp allows one job before it gives up and retries.
+pub const AMP_JOB_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// How long the whole job may take.
 ///
-/// Amp allows five minutes and retries after that, so jorb has to fail first:
-/// a job that is still running when Amp gives up would be a second job
-/// running against the same orb.
+/// jorb has to fail before Amp gives up: a job still running when Amp retries
+/// would be a second job against the same orb. The assertion below is what
+/// keeps the two numbers in that order.
 pub const JOB_DEADLINE: Duration = Duration::from_secs(240);
+
+const _: () = assert!(JOB_DEADLINE.as_secs() < AMP_JOB_TIMEOUT.as_secs());
 
 /// How long to wait for Cloud Hypervisor to open its API socket.
 ///
@@ -93,9 +110,9 @@ pub const UNIT_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// to a local bus; anything slower is a systemd that is not answering.
 pub const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How many `jorb-*` units recover will look at. One per slot is the real
-/// number; this bounds the loop even if systemd lists something unexpected.
-pub const MAX_UNITS_TO_RECOVER: usize = MAX_SLOTS as usize;
+/// How many orb units recover will look at. One per slot is the real number;
+/// this bounds the loop even if systemd lists something unexpected.
+pub const MAX_UNITS_TO_RECOVER: usize = MAX_SLOTS;
 
 /// How long to wait for a stopped unit to actually be gone, and how often to
 /// look. Stopping is a kill and a reap, so this is short.
