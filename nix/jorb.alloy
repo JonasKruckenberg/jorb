@@ -9,12 +9,16 @@
 // ASSUMES A11: Alloy's cAdvisor exporter reports the /jorb.slice cgroups at
 // all, and the host's journal already reaches Loki. G7 checks both.
 //
-// cAdvisor reports every cgroup on the host; the relabel step below is what
-// narrows it to jorb.slice. Container labels are off because an orb is a VM,
-// not a container, and has none.
+// Collect jorb.slice and nothing else. In cAdvisor, docker_only turns off
+// every raw cgroup except the root, the allowlist names the prefixes to
+// collect anyway, and the root is turned off separately. With no Docker on the
+// host that leaves the orbs. Container labels are off because an orb is a VM
+// and has none.
 prometheus.exporter.cadvisor "jorb" {
-	store_container_labels = false
-	docker_only            = false
+	store_container_labels      = false
+	docker_only                 = true
+	raw_cgroup_prefix_allowlist = ["/jorb.slice/"]
+	disable_root_cgroup_stats   = true
 }
 
 prometheus.scrape "jorb" {
@@ -27,8 +31,8 @@ prometheus.scrape "jorb" {
 prometheus.relabel "jorb" {
 	forward_to = [prometheus.remote_write.jorb.receiver]
 
-	// Everything outside the slice belongs to whatever else runs on this
-	// host, and the owner's own Alloy already has an opinion about that.
+	// The exporter is already restricted; this keeps a container the host
+	// might run under Docker out of jorb's series too.
 	rule {
 		action        = "keep"
 		source_labels = ["id"]

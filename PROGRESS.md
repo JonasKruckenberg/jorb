@@ -1425,3 +1425,46 @@ Confirmed: the module set `zramSwap.enable`, `net.ipv4.ip_forward` and
   `ip_forward = 0` and `zramSwap.enable = false` it fails with "services.jorb
   needs net.ipv4.ip_forward: orbs reach the internet through the host." With
   only `zramSwap.enable = false` it evaluates.
+
+### N4. Cloud Hypervisor runs as unconfined root: not done, awaiting the host
+
+Confirmed: `systemd-run` starts the VMM with no sandboxing properties, and
+the VM shape has `landlock_enable: false`.
+
+Not implemented. The review's method is to add one property at a time and
+rerun matrix sections 1, 3, 5 and 7 after each, recording `systemd-analyze
+security` before and after. Every step of that needs the host, and a
+property that breaks boot breaks every spawn, so adding them unrun would be
+shipping a guess. The list to work through, in this order, each as a
+`--property=` on `unit::start`:
+
+1. `NoNewPrivileges=yes`
+2. `PrivateTmp=yes`, `ProtectHome=yes`
+3. `DevicePolicy=closed`, `DeviceAllow=/dev/kvm rw`, `DeviceAllow=/dev/net/tun rw`
+4. `ProtectSystem=strict`, `ReadWritePaths=<the orb's disk> <the run directory>`
+   (the config disk is opened read-only and needs no entry)
+5. `CapabilityBoundingSet=CAP_NET_ADMIN` (creating and configuring the tap),
+   then check whether Cloud Hypervisor needs anything else on this host
+6. `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`,
+   `ProtectControlGroups=yes`, `RestrictNamespaces=yes`
+
+`[host]` record `systemd-analyze security jorb-orb-<id>.service` for a running
+orb first.
+
+### N5. The observability fragment scraped every cgroup
+
+Confirmed: the exporter had `docker_only = false` and a relabel `keep` rule
+did the narrowing after the scrape.
+
+- Alloy's reference (fetched 2026-11-18) documents
+  `raw_cgroup_prefix_allowlist` as "List of `cgroup` path prefixes to
+  collect, even when you set `docker_only`", and cAdvisor's own docs describe
+  `--docker_only` as "do not report raw cgroup metrics, except the root
+  cgroup". Neither says whether the allowlist restricts anything when
+  `docker_only` is false, so the fragment uses `docker_only = true`, the
+  allowlist `["/jorb.slice/"]`, and `disable_root_cgroup_stats = true`.
+- The relabel `keep` rule stays, now commented as the guard against a
+  Docker container on the host. It costs nothing and the source restriction
+  is unverified.
+- The module check's `drvPath` evaluates. `[host]` whether the orbs' series
+  still appear, and nothing else does, is part of G7 and awaits a run.
