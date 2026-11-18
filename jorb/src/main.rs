@@ -6,7 +6,6 @@
 
 mod command;
 mod limits;
-mod operations;
 mod request;
 mod settings;
 mod systemd;
@@ -74,12 +73,9 @@ async fn main() -> ExitCode {
 /// applies the operation under a deadline below Amp's.
 async fn run(request: &Request, settings: &Settings) -> Result<()> {
     let _lock = lock(settings).await?;
-    timeout(
-        limits::REQUEST_DEADLINE,
-        operations::apply(settings, request),
-    )
-    .await
-    .with_context(|| format!("not finished within {:?}", limits::REQUEST_DEADLINE))?
+    timeout(limits::REQUEST_DEADLINE, request.apply(settings))
+        .await
+        .with_context(|| format!("not finished within {:?}", limits::REQUEST_DEADLINE))?
 }
 
 async fn lock(settings: &Settings) -> Result<File> {
