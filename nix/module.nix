@@ -127,7 +127,9 @@ in
     };
 
     tokenFile = mkOption {
-      type = types.path;
+      # A string, not a path: a path literal would copy the credential into
+      # the world-readable store.
+      type = types.str;
       example = "/var/lib/secrets/jorb-provider.env";
       description = ''
         An environment file holding the provider's own Amp credential, read by
@@ -271,6 +273,10 @@ in
           message =
             "services.jorb.stateImage (${toString cfg.stateImage}) is inside"
             + " stateDirectory (${cfg.stateDirectory}), where mounting it would hide it.";
+        }
+        {
+          assertion = lib.hasPrefix "/" cfg.tokenFile;
+          message = "services.jorb.tokenFile must be an absolute path outside the Nix store.";
         }
         {
           assertion = cfg.slots <= 256;
@@ -475,6 +481,16 @@ in
             }
           }
 
+          set slot-sources {
+            type ifname . ipv4_addr
+            comment "each slot's tap and the one address its guest may send from"
+            elements = {
+              ${lib.concatMapStringsSep ",\n              " (
+                slot: "\"jorb${toString slot}\" . 10.77.${toString slot}.2"
+              ) (lib.range 0 (cfg.slots - 1))}
+            }
+          }
+
           chain input {
             type filter hook input priority filter; policy accept;
 
@@ -491,9 +507,10 @@ in
             # not a route this host offers.
             iifname "jorb*" meta nfproto ipv6 drop
 
-            # A guest may only send from the slots' addresses, so a spoofed
-            # source cannot be masqueraded into someone else's traffic.
-            iifname "jorb*" ip saddr != 10.77.0.0/16 drop
+            # A guest may only send from its own slot's address, so one orb
+            # cannot take another's address and have its replies delivered
+            # there.
+            iifname . ip saddr != @slot-sources iifname "jorb*" drop
 
             iifname "jorb*" ip daddr @not-the-internet drop
 

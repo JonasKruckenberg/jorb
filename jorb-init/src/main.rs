@@ -130,12 +130,11 @@ fn write_hosts() -> Result<()> {
     fs::write(constants::HOSTS, hosts(hostname.trim())).context("writing /etc/hosts")
 }
 
-/// `127.0.0.2` keeps the hostname off the `localhost` line, as Debian does.
 fn hosts(hostname: &str) -> String {
     format!(
-        "127.0.0.1\tlocalhost\n\
-         ::1\tlocalhost ip6-localhost ip6-loopback\n\
-         127.0.0.2\t{hostname}\n"
+        "{}{}\t{hostname}\n",
+        constants::LOOPBACK_HOSTS,
+        constants::HOSTNAME_ADDRESS
     )
 }
 

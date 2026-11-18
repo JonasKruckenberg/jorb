@@ -48,16 +48,25 @@ pub async fn recover(settings: &Settings) -> Result<Vec<OrbId>> {
             continue;
         };
 
+        // `recovered`, not `orb`: these events sit inside the job's span,
+        // whose `orb` is the job's own.
         match vm::state(settings, &orb).await {
             Ok(VmState::Running) => {
+                // The model makes this unreachable, so seeing it is a bug.
+                let disk = disk::disk_path(settings, &orb);
+                ensure!(
+                    disk.try_exists()?,
+                    "{orb}'s VM is running but its disk {} does not exist",
+                    disk.display()
+                );
                 running.push(orb);
                 continue;
             }
             Ok(state) => {
-                info!(orb = %orb, state = ?state, "stopping a unit whose VM is not running");
+                info!(recovered = %orb, state = ?state, "stopping a unit whose VM is not running");
             }
             Err(error) => warn!(
-                orb = %orb,
+                recovered = %orb,
                 error = format!("{error:#}"),
                 "stopping a unit whose VMM did not answer"
             ),

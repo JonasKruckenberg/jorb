@@ -55,7 +55,8 @@ sections_run=0
 # unit to start at all.
 boot_deadline=${JORB_MATRIX_BOOT_DEADLINE:-90}
 no_socket_deadline=${JORB_MATRIX_NO_SOCKET_DEADLINE:-40}
-# jorb's LOCK_WAIT plus JOB_DEADLINE, the longest a job can run.
+# jorb's LOCK_WAIT plus JOB_DEADLINE in jorb/src/limits.rs, the longest a job
+# can run. Change it with them.
 job_deadline=280
 
 # ---------------------------------------------------------------- the harness
@@ -266,8 +267,7 @@ wait_until_ready() {
 # was ready, and when the guest kernel reached init by its own clock. The
 # second number is what tells a slow kernel from a slow host.
 record_latency() {
-	local orb=$1 started=$2 log
-	log=$(guest_log "$orb")
+	local log=$1 started=$2
 	evidence "spawn to bootstrap ready: $(($(date +%s) - started))s"
 	evidence "kernel reached init: $(printf '%s\n' "$log" | grep -m1 'Run /jorb-init as init process' || echo 'not in the journal')"
 	evidence "kernel's last line before init: $(printf '%s\n' "$log" | grep -B1 -m1 'Run /jorb-init as init process' | head -n 1)"
@@ -292,6 +292,24 @@ guest_log() {
 	invocation=$(systemctl show -p InvocationID --value "$(unit_of "$1")" 2>/dev/null || true)
 	[ -n "$invocation" ] || return 0
 	journalctl "_SYSTEMD_INVOCATION_ID=$invocation" --no-pager --output cat 2>/dev/null || true
+}
+
+# One unit invocation's journal, which outlives the unit.
+invocation_log() {
+	[ -n "$1" ] || return 0
+	journalctl "_SYSTEMD_INVOCATION_ID=$1" --no-pager --output cat 2>/dev/null || true
+}
+
+wait_for_journal_marker() {
+	local invocation=$1 wanted=$2 waited=0
+	while [ "$waited" -lt "$boot_deadline" ]; do
+		if invocation_log "$invocation" | grep -q "JORB-GATE $wanted"; then
+			return 0
+		fi
+		sleep 1
+		waited=$((waited + 1))
+	done
+	return 1
 }
 
 # Back to nothing: no units, no taps, no sockets, no orb disks. The base
@@ -508,7 +526,7 @@ section_4() {
 	started=$(date +%s)
 	job spawn "$orb" "$token" || note "the spawn failed"
 	wait_until_ready "$orb" || true
-	record_latency "$orb" "$started"
+	record_latency "$(guest_log "$orb")" "$started"
 	kill "$listener" 2>/dev/null || true
 
 	local probes
@@ -749,10 +767,12 @@ section_9() {
 
 	started=$(date +%s)
 	job spawn "$orb" "$token-exit-bootstrap" || note "the spawn failed"
-	wait_until_ready "$orb" || true
-	record_latency "$orb" "$started"
-	# Read now: once the unit is collected, guest_log has nothing to go on.
+	# Read before waiting: the guest powers off two seconds after it is ready,
+	# and once the unit is collected its invocation id is gone.
 	invocation=$(systemctl show -p InvocationID --value "$(unit_of "$orb")")
+	[ -n "$invocation" ] || note "the unit was gone before its invocation id could be read"
+	wait_for_journal_marker "$invocation" 'amp ready' || note "$orb never said it was ready"
+	record_latency "$(invocation_log "$invocation")" "$started"
 
 	while [ "$waited" -lt "$boot_deadline" ]; do
 		if ! systemctl is-active --quiet "$(unit_of "$orb")"; then
@@ -765,7 +785,7 @@ section_9() {
 	evidence "the unit was active for ${waited}s after the stand-in said it was ready"
 	[ -n "$stopped" ] || note "the unit was still active ${boot_deadline}s after ready"
 
-	log=$(journalctl "_SYSTEMD_INVOCATION_ID=$invocation" --no-pager --output cat 2>/dev/null || true)
+	log=$(invocation_log "$invocation")
 	exits=$(printf '%s\n' "$log" | grep -c 'bootstrap exited, powering off' || true)
 	errors=$(printf '%s\n' "$log" | grep -c '"level":"ERROR"' || true)
 	evidence "jorb-init logged $exits exit events and $errors errors"
@@ -786,14 +806,15 @@ section_10() {
 	wipe_everything
 	mkdir -p "$JORB_STATE_DIR/disks" "$JORB_RUN_DIR"
 
-	local orb=m10 status=0
+	local orb=m10 status=0 saved=$work/jorb-table.nft
 
-	# The table comes back from the module's ruleset at the end of the
-	# section, whatever happened in it.
+	# Only jorb's table goes and comes back; the rest of the host's ruleset
+	# is not touched.
+	nft list table inet jorb >"$saved" || note "could not save the table"
 	nft delete table inet jorb || note "could not delete the table"
 	job spawn "$orb" "$token" || status=$?
-	systemctl restart nftables.service || note "could not restore the ruleset"
-	module_installed || note "the table did not come back; the host is unconfined"
+	nft -f "$saved" || note "could not restore the table"
+	module_installed || note "the table did not come back; orbs on this host are unconfined"
 
 	evidence "spawn without the table exited $status"
 	[ "$status" -ne 0 ] || note "spawn succeeded without the network policy"

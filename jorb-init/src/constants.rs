@@ -12,6 +12,14 @@ pub const CONFIG_DISK_DEVICE: &str = "/dev/vdb";
 pub const HOSTNAME: &str = "/proc/sys/kernel/hostname";
 pub const HOSTS: &str = "/etc/hosts";
 
+/// What `/etc/hosts` says before the hostname's own line.
+pub const LOOPBACK_HOSTS: &str =
+    "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n";
+
+/// The hostname's address: a loopback address of its own keeps it off the
+/// `localhost` line, as Debian does.
+pub const HOSTNAME_ADDRESS: &str = "127.0.0.2";
+
 /// The image's own environment, written into the base image by
 /// jorb-prepare-image from the container config's `Env`.
 pub const ENV_FILE: &str = "/etc/jorb-env";

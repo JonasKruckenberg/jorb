@@ -59,8 +59,8 @@ sudo -E tests/host/jorb-init-in-guest.sh        # jorb-init in a real guest
 
 **The behaviour matrix**, all ten sections or one at a time. Every section
 now needs the module installed, because jorb refuses to start an orb without
-the `inet jorb` table (N1). Section 10 deletes that table and restores it with
-`systemctl restart nftables.service`. The review asked for sections 1, 2, 3
+the `inet jorb` table (N1). Section 10 deletes that table and restores it from a
+copy taken first. The review asked for sections 1, 2, 3
 and 6 before and after its phase 3; neither run happened, so run them first.
 
 ```sh
@@ -559,6 +559,13 @@ change, so it waits on the owner.
    changed between two G6 runs less than an hour apart. T6 pins a digest, and
    refreshing it means running G6 again.
 5. Removed by S2: jorb supports aarch64 NixOS only.
+
+6. `[owner]` AGENTS.md says to log `ORB_IMAGE`, `ORB_SNAPSHOT_ID` and
+   `ORB_TYPE` at debug level, but the sudo rule strips them. Drop the
+   sentence, or preserve the three variables? (V5, finding 3.)
+7. `[owner]` `jorb-vmm`'s build dependencies `openapiv3` and `serde_yaml`
+   are outside the allowlist, which names only `progenitor`. Add them?
+   (V5, finding 7.)
 
 ## Proposals
 
@@ -1407,7 +1414,8 @@ reaches the host and the LAN.
   needs the module's table. `setup` fails early with that message rather
   than letting each section fail on its own.
 - New matrix section 10: delete the table, spawn, restore the ruleset with
-  `systemctl restart nftables.service`, then require a non-zero exit, the
+  `systemctl restart nftables.service` (changed by V5 to restoring a saved
+  copy of the table only), then require a non-zero exit, the
   table named in the log, and no unit. `[host]` awaiting a run.
 - The container check: clean. shellcheck and nixfmt clean.
 
@@ -1562,3 +1570,65 @@ Confirmed: the check read single options and never forced
   went (a device probe, entropy, a timeout). Nothing is tuned until a host
   run says why.
 - shellcheck clean. `[host]` awaiting a run.
+
+### V5. Review with fresh context
+
+A subagent with no part in this work reviewed `git diff f95635c..HEAD` against
+AGENTS.md's Model, Failure model, Fixed interfaces, Security, Names and
+Bounds. It found nothing severe and confirmed the token handling, the sudo
+boundary, the bounds and the ordering. What it raised, and what became of
+it:
+
+Fixed:
+
+1. **One orb could send from another's address.** N2's rule checked the
+   /16, and its comment claimed more. The forward chain now drops anything
+   from a tap whose `iifname . ip saddr` is not in a `slot-sources` set
+   generated from `slots` (`"jorb0" . 10.77.0.2`, …). `nft --check` over the
+   table rendered for `slots = 3` passes in the Alpine container. AGENTS.md's
+   Network policy says "that slot's guest address".
+2. **Matrix section 9 raced the guest's power-off**: it read the unit's
+   invocation id after waiting for `amp ready`, when the unit may already be
+   collected. It reads the id right after the spawn and waits on that
+   invocation's journal.
+4. **The stop's error was discarded.** `unit::stop` keeps it and puts it in
+   the error when the unit outlives `UNIT_GONE_WAIT`.
+5. **"Running without a disk" was never checked.** `recover` now fails the
+   job, naming the orb and the path, if a VM it confirmed running has no
+   disk. AGENTS.md calls that an invariant violation to report.
+6. **Bare literals.** `vm.rs` names `SLOT_NETWORK`, `HOST_PART`,
+   `GUEST_PART` and `ROOT_DEVICE`; jorb-init names `LOOPBACK_HOSTS` and
+   `HOSTNAME_ADDRESS`. The matrix's `job_deadline=280` says where it comes
+   from.
+9. **A blocking connect on the job's only thread.** The readiness probe is
+   `tokio::net::UnixStream::connect` under a `API_SOCKET_POLL` timeout, so a
+   full backlog counts as "not yet" rather than freezing the runtime. tokio
+   gained its `net` feature.
+11. **`tokenFile` as `types.path`** would copy a path literal's credential
+   into the store. It is `types.str`, asserted absolute.
+12. **Section 10 restarted `nftables.service`**, which flushes the whole
+   host ruleset. It saves `inet jorb` with `nft list table`, deletes it, and
+   restores it with `nft -f`.
+13. **Recover's events set `orb` inside the job's span.** They use
+   `recovered` instead, so `orb` stays the job's.
+
+Not changed, for the owner:
+
+3. AGENTS.md's Contract says to log `ORB_IMAGE`, `ORB_SNAPSHOT_ID` and
+   `ORB_TYPE` once at debug level. jorb never did, and the sudo rule's
+   `env_keep` strips them before jorb runs. Either the sentence goes or the
+   sudo rule preserves three more variables; the second widens the privilege
+   boundary, so it is the owner's choice. Open question 6.
+7. `jorb-vmm` has `openapiv3` and `serde_yaml` as build dependencies since
+   T2, and the allowlist names only `progenitor`. Adding them to the allowlist
+   is the owner's call. Open question 7.
+8. A failed power-off leaves a halted guest that Cloud Hypervisor reports
+   `Running`: Proposal 3.
+10. `kill_on_drop` acts on external state when a future is dropped. It is
+   what makes the subprocess timeout kill the child, and it never runs on a
+   path a `kill -9` would skip in a way that matters (a killed jorb leaves a
+   child either way, and that child is a `systemctl` call). Recorded here,
+   not changed.
+
+The container check: clean, 31 tests. shellcheck and nixfmt clean. The module
+check's `drvPath` evaluates.

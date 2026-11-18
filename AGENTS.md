@@ -104,7 +104,7 @@ Units are `jorb-orb-<id>.service` inside `jorb.slice`, started with `systemd-run
 
 `jorb-init` knows nothing about Amp's job protocol; `jorb` knows nothing about guest internals. The config disk is the whole interface between them.
 
-**Network policy.** Orbs are internet-only. No guest-initiated packet may reach the host or any private, link-local, CGNAT, loopback or multicast range, and IPv6 from orbs is dropped. A packet from a tap must come from `10.77.0.0/16`, and nothing reaches a tap unless it belongs to a connection the orb opened. Policy lives in one nftables table, `inet jorb`, in the Nix module, matching `iifname "jorb*"` and `oifname "jorb*"`. Rust owns the slot-to-address function and one check: `start` refuses to start an orb unless that table is loaded, because the policy only drops and so fails open without it.
+**Network policy.** Orbs are internet-only. No guest-initiated packet may reach the host or any private, link-local, CGNAT, loopback or multicast range, and IPv6 from orbs is dropped. A packet from a tap must come from that slot's guest address, and nothing reaches a tap unless it belongs to a connection the orb opened. Policy lives in one nftables table, `inet jorb`, in the Nix module, matching `iifname "jorb*"` and `oifname "jorb*"`. Rust owns the slot-to-address function and one check: `start` refuses to start an orb unless that table is loaded, because the policy only drops and so fails open without it.
 
 ## Crates
 

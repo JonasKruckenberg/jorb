@@ -7,13 +7,13 @@
 
 use std::io::ErrorKind;
 use std::net::Ipv4Addr;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
 use jorb_vmm::{Tap, VmShape, VmState};
-use tokio::time::sleep;
+use tokio::net::UnixStream;
+use tokio::time::{sleep, timeout};
 
 use crate::disk;
 use crate::job::OrbId;
@@ -26,6 +26,14 @@ const TAP_PREFIX: &str = "jorb";
 
 /// Where the kernel lists interfaces.
 const SYS_CLASS_NET: &str = "/sys/class/net";
+
+/// Slot S is `10.77.S.0/30`: the host takes `.1` and the guest `.2`.
+const SLOT_NETWORK: [u8; 2] = [10, 77];
+const HOST_PART: u8 = 1;
+const GUEST_PART: u8 = 2;
+
+/// The first disk attached, which is the orb's own.
+const ROOT_DEVICE: &str = "/dev/vda";
 
 /// A slot's network is a /30: the host's address, the guest's, nothing else.
 const GUEST_NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 252);
@@ -76,12 +84,14 @@ impl Slot {
 
     /// `10.77.S.1`.
     fn host_address(self) -> Ipv4Addr {
-        Ipv4Addr::new(10, 77, self.0, 1)
+        let [first, second] = SLOT_NETWORK;
+        Ipv4Addr::new(first, second, self.0, HOST_PART)
     }
 
     /// `10.77.S.2`.
     fn guest_address(self) -> Ipv4Addr {
-        Ipv4Addr::new(10, 77, self.0, 2)
+        let [first, second] = SLOT_NETWORK;
+        Ipv4Addr::new(first, second, self.0, GUEST_PART)
     }
 }
 
@@ -89,7 +99,7 @@ impl Slot {
 /// so nothing inside the guest configures an interface.
 fn cmdline(slot: Slot, orb: &OrbId) -> String {
     format!(
-        "console={CONSOLE_DEVICE} root=/dev/vda rw init={GUEST_INIT} \
+        "console={CONSOLE_DEVICE} root={ROOT_DEVICE} rw init={GUEST_INIT} \
          ip={guest}::{host}:{GUEST_NETMASK}:{orb}:{GUEST_INTERFACE}:off:{PRIMARY_DNS}:{SECONDARY_DNS}",
         guest = slot.guest_address(),
         host = slot.host_address(),
@@ -166,7 +176,7 @@ pub async fn boot(settings: &Settings, orb: &OrbId, slot: Slot) -> Result<()> {
 async fn wait_for_socket(socket: &Path) -> Result<()> {
     let deadline = Instant::now() + limits::API_SOCKET_WAIT;
 
-    while !accepts_connections(socket)? {
+    while !accepts_connections(socket).await? {
         ensure!(
             Instant::now() < deadline,
             "nothing listened on {} within {:?}",
@@ -179,8 +189,13 @@ async fn wait_for_socket(socket: &Path) -> Result<()> {
     Ok(())
 }
 
-fn accepts_connections(socket: &Path) -> Result<bool> {
-    match UnixStream::connect(socket) {
+/// Bounded by the poll interval: a connect to a VMM whose backlog is full
+/// would otherwise block, and on this runtime nothing else could run.
+async fn accepts_connections(socket: &Path) -> Result<bool> {
+    let Ok(connected) = timeout(limits::API_SOCKET_POLL, UnixStream::connect(socket)).await else {
+        return Ok(false);
+    };
+    match connected {
         Ok(_) => Ok(true),
         Err(error)
             if matches!(
@@ -198,22 +213,22 @@ fn accepts_connections(socket: &Path) -> Result<bool> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_socket_counts_as_ready_only_once_something_listens() {
+    #[tokio::test]
+    async fn a_socket_counts_as_ready_only_once_something_listens() {
         let directory = std::env::temp_dir().join("jorb-tests").join("socket");
         std::fs::create_dir_all(&directory).unwrap();
         let socket = directory.join("vmm.sock");
         let _ = std::fs::remove_file(&socket);
 
-        assert!(!accepts_connections(&socket).unwrap(), "no file");
+        assert!(!accepts_connections(&socket).await.unwrap(), "no file");
 
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        assert!(accepts_connections(&socket).unwrap(), "a listener");
+        assert!(accepts_connections(&socket).await.unwrap(), "a listener");
 
         drop(listener);
         assert!(socket.exists());
         assert!(
-            !accepts_connections(&socket).unwrap(),
+            !accepts_connections(&socket).await.unwrap(),
             "a file nobody listens on"
         );
     }

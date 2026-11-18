@@ -99,14 +99,20 @@ pub async fn stop(orb: &OrbId) -> Result<()> {
     let unit = unit_name(orb);
 
     // Without --no-block, so this waits for the stop job.
-    let _ = run(SYSTEMCTL, &["--no-ask-password", "stop", &unit]).await;
+    // Its exit code is not the postcondition, but its stderr is the evidence
+    // if the unit outlives the wait.
+    let stopped = run(SYSTEMCTL, &["--no-ask-password", "stop", &unit]).await;
 
     let deadline = Instant::now() + limits::UNIT_GONE_WAIT;
     while is_active(&unit).await? {
         ensure!(
             Instant::now() < deadline,
-            "{unit} was still active {:?} after being stopped",
-            limits::UNIT_GONE_WAIT
+            "{unit} was still active {:?} after being stopped; the stop said: {}",
+            limits::UNIT_GONE_WAIT,
+            match &stopped {
+                Ok(_) => "nothing".to_owned(),
+                Err(error) => format!("{error:#}"),
+            }
         );
         sleep(limits::UNIT_GONE_POLL).await;
     }
