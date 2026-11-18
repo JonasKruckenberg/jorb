@@ -926,3 +926,40 @@ sections. The unit rename is the part that reaches outside Rust: Alloy's
 relabel regex, the dashboard's `orb` label, G1's pattern and matrix.sh all
 had to move with it, and matrix.sh lost the `grep -v jorb-provider.service`
 it needed twice.
+
+## External review of f95635c, 2026-11-18
+
+An external review of `f95635c` listed findings by phase (P0, S1-S3, C1-C3,
+R1-R9, B1-B5, N1-N5, D1-D3, V1-V5). Each was checked against the code before
+being acted on. One commit per finding, named by its ID; this section records
+what was checked and what each check printed. The owner decided the four
+`[owner]` items on 2026-11-18: R7 replaces the builder with a shape struct, B3
+powers off when bootstrap exits, N3 uses `mkDefault` plus assertions, and the
+working-tree deletion of `PLAN.md`, `PROGRESS.md` and `tests/host/` was
+reverted.
+
+### How the checks ran
+
+This session ran on an aarch64-darwin laptop, not on the jorb host, and nix
+here has no Linux builder. So:
+
+- `nix flake check` on this machine evaluates the flake and reports "all
+  checks passed", but it omits `aarch64-linux`, so it builds none of the
+  checks. That pass is not evidence and is not recorded as one.
+- fmt, clippy and the test suite ran in an aarch64 Linux container
+  (`rust:latest`, cargo 1.91 or later) with the workspace mounted and
+  `CH_OPENAPI_SPEC` pointed at the spec from the same `cloud-hypervisor.src`
+  the flake uses. That is called "the container check" below.
+- Nix evaluation of the module (`nix eval` of the check's `drvPath`, which
+  forces the NixOS configuration) runs on this machine without building.
+- Every `[host]` check is recorded as awaiting a host run.
+
+### P0. Baseline
+
+- The container check at `f95635c`: `cargo fmt --all --check` clean,
+  `cargo clippy --workspace --all-targets -- -D warnings` clean, `cargo test
+  --workspace` 27 passed (20 in `jorb`, 5 in `jorb-init`, 2 in `jorb-vmm`).
+- `nix flake check`: not run on Linux this session (see above).
+- `[host]` matrix sections 1, 2, 3 and 6: awaiting a host run. The review asks
+  for these before and after phase 3; neither run happened in this session,
+  so phase 3 went ahead on unit tests and evaluation alone.
