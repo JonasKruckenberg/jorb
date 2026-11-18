@@ -48,7 +48,7 @@ Rules that keep this correct:
 jorb is crash-only: the start path is the recovery path, and there is no other.
 
 - Assume any previous job was killed at any instruction. `kill -9`, a host power cut and an ordinary error must all leave something the next job handles the same way.
-- `recover` stops every `jorb-orb-*` unit whose VM is not `Running` according to its API. Under the lock no job is mid-start, so such a unit is debris from a job that died. This is what frees a slot held by a half-started VM, including one that belongs to a different orb.
+- `recover` stops every `jorb-orb-*` unit whose VM is not confirmed `Running` by its API: any other answer, or no answer within the API timeout, means stop it. Under the lock no job is mid-start, so such a unit is debris from a job that died. This is what frees a slot held by a half-started VM, including one that belongs to a different orb.
 - Each primitive establishes its own preconditions on entry rather than trusting a predecessor's exit: truncate `disks/.tmp`, remove a stale socket, overwrite the config disk.
 - Write no cleanup that runs on the way out: no cleanup in error branches, no `Drop` for external state, no signal handlers. That code would be a second path that a kill skips anyway.
 - Fail early and loudly. On any unexpected condition, log one error event with the evidence and exit non-zero. No retries inside a job, no fallbacks, no silent repair. "Crash" here means an error return with context, not `panic!`; the clippy ban on panics stays because an error carries a better message.

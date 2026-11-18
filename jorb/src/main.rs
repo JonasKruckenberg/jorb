@@ -111,15 +111,20 @@ async fn run(job: &Job, settings: &Settings) -> Result<Transition> {
     let _lock = take_lock(&disk::lock_path(settings)).await?;
 
     timeout(limits::JOB_DEADLINE, async {
-        operations::recover(settings).await?;
+        // Recover stopped every unit whose VM it could not confirm running,
+        // so under the lock an orb is either in this list or absent.
+        let running = operations::recover(settings).await?;
+        let before = if running.contains(orb) {
+            VmState::Running
+        } else {
+            VmState::Absent
+        };
 
-        // Recover has just stopped every unit whose VM was not running, so
-        // under the lock this is either Running or Absent.
-        let before = vm::state(settings, orb).await?;
-
+        // Pause and delete stop first and observe afterwards, when the socket
+        // is gone, so a VMM that does not answer cannot fail them.
         match job {
             Job::Spawn { config_disk, .. } => {
-                operations::spawn(settings, orb, config_disk, before).await?;
+                operations::spawn(settings, orb, config_disk, &running).await?;
             }
             Job::Pause { .. } => operations::pause(settings, orb).await?,
             Job::Delete { .. } => operations::delete(settings, orb).await?,

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # T11: what jorb does, checked against what the plan says it should do.
 #
-# Seven sections, each printing its own PASS or FAIL line plus evidence, and
+# Eight sections, each printing its own PASS or FAIL line plus evidence, and
 # one summary line at the end. Everything runs against the busybox test image
 # with a dummy token: no Amp, no real orb, no test hooks in jorb itself.
 #
 # Usage: sudo -E tests/host/matrix.sh [section...]
-#   with no arguments it runs all seven.
+#   with no arguments it runs all eight.
 
 # The sections are dispatched by name, which hides every call from here.
 # shellcheck disable=SC2329
@@ -51,6 +51,8 @@ sections_run=0
 # unit to start at all.
 boot_deadline=${JORB_MATRIX_BOOT_DEADLINE:-90}
 no_socket_deadline=${JORB_MATRIX_NO_SOCKET_DEADLINE:-40}
+# jorb's JOB_DEADLINE.
+job_deadline=240
 
 # ---------------------------------------------------------------- the harness
 
@@ -668,13 +670,53 @@ section_7() {
 	finish_section 7 "one slot, two orbs, and a VMM killed under it"
 }
 
+# ------------------------------------------- 8. a VMM that does not answer
+
+section_8() {
+	section 8 "a stopped VMM does not block the jobs that clear it"
+
+	wipe_everything
+	mkdir -p "$JORB_STATE_DIR/disks" "$JORB_RUN_DIR"
+
+	local first=m8a second=m8b started elapsed status=0
+
+	job spawn "$first" "$token" || note "the first spawn failed"
+	wait_until_running "$first" || true
+	expect_state "$first" "$(wanted_for spawn)" || note "$first did not come up"
+
+	# SIGSTOP leaves the VMM alive, holding its socket and slot, and answering
+	# nothing.
+	pkill -STOP -f "$JORB_RUN_DIR/$first.sock" || note "no VMM to stop"
+
+	started=$(date +%s)
+	job delete "$first" || status=$?
+	elapsed=$(($(date +%s) - started))
+	evidence "delete of a stopped VMM's orb exited $status after ${elapsed}s"
+
+	if [ "$status" -ne 0 ]; then
+		note "the delete failed"
+	fi
+	if [ "$elapsed" -gt "$job_deadline" ]; then
+		note "the delete took past the job deadline"
+	fi
+
+	job spawn "$second" "$token" || note "the spawn of $second after the delete failed"
+	wait_until_running "$second" || true
+	expect_state "$second" "$(wanted_for spawn)" || note "$second did not take the freed slot"
+
+	job delete "$second" || note "the cleanup delete failed"
+	wipe_everything
+	expect_no_debris || note "something was left behind"
+	finish_section 8 "a stopped VMM does not block the jobs that clear it"
+}
+
 # ------------------------------------------------------------------ the whole
 
 setup
 
 requested=("$@")
 if [ "${#requested[@]}" -eq 0 ]; then
-	requested=(1 2 3 4 5 6 7)
+	requested=(1 2 3 4 5 6 7 8)
 fi
 
 for number in "${requested[@]}"; do

@@ -20,7 +20,7 @@ use std::fs::{File, OpenOptions};
 use anyhow::{Context, Result, ensure};
 use jorb_config_disk::ConfigDisk;
 use jorb_vmm::VmState;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 use crate::disk;
 use crate::job::OrbId;
@@ -28,47 +28,61 @@ use crate::settings::Settings;
 use crate::unit;
 use crate::vm::{self, Slot};
 
-/// Stops every orb unit whose VM is not running, whichever orb it belongs to.
+/// Stops every orb unit whose VM is not confirmed running, whichever orb it
+/// belongs to, and returns the orbs that are.
 ///
 /// Under the lock no job is mid-start, so such a unit is debris from a job
-/// that died, and stopping it frees the slot its half-started VM held.
+/// that died, and stopping it frees the slot its half-started VM held. A VMM
+/// that does not answer is stopped too: leaving it would fail every job on
+/// the host, including the pause or delete that would clear it. The cost is
+/// that a VMM slower than the API timeout is stopped while alive.
 #[instrument(skip_all)]
-pub async fn recover(settings: &Settings) -> Result<()> {
+pub async fn recover(settings: &Settings) -> Result<Vec<OrbId>> {
     let units = unit::orb_units().await?;
     debug!(count = units.len(), "orb units");
 
+    let mut running = Vec::new();
     for unit in units {
         let Some(orb) = unit::orb_of_unit(&unit) else {
             info!(unit = %unit, "a unit that is not named after an orb; leaving it alone");
             continue;
         };
 
-        let state = vm::state(settings, &orb).await?;
-        if state == VmState::Running {
-            continue;
+        match vm::state(settings, &orb).await {
+            Ok(VmState::Running) => {
+                running.push(orb);
+                continue;
+            }
+            Ok(state) => {
+                info!(orb = %orb, state = ?state, "stopping a unit whose VM is not running");
+            }
+            Err(error) => warn!(
+                orb = %orb,
+                error = format!("{error:#}"),
+                "stopping a unit whose VMM did not answer"
+            ),
         }
-
-        info!(orb = %orb, state = ?state, "stopping a unit whose VM is not running");
         stop(settings, &orb).await?;
     }
 
-    Ok(())
+    Ok(running)
 }
 
 /// Leaves a healthy orb alone, otherwise starts it from where it is.
 ///
 /// Healthy means a running VM with a byte-identical config disk. A changed
 /// token leaves the old VM unable to talk to Amp, so it is restarted with the
-/// new one. `state` was observed under this job's lock.
+/// new one. `running` is what this job's `recover` confirmed, under the same
+/// lock.
 #[instrument(skip_all)]
 pub async fn spawn(
     settings: &Settings,
     orb: &OrbId,
     config_disk: &ConfigDisk,
-    state: VmState,
+    running: &[OrbId],
 ) -> Result<()> {
     let config_disk_path = disk::config_disk_path(settings, orb);
-    if state == VmState::Running && disk::config_disk_matches(&config_disk_path, config_disk)? {
+    if running.contains(orb) && disk::config_disk_matches(&config_disk_path, config_disk)? {
         info!("already running with this config; leaving it alone");
         return Ok(());
     }

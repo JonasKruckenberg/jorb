@@ -1247,3 +1247,27 @@ provider's `ExecStartPre`.
   `ASSUMES A11` in `nix/jorb.alloy` stays: A11 is not yet verified, and the
   marker is what AGENTS.md asks for.
 - shellcheck and the container check: clean.
+
+### B1. One unresponsive VMM failed every job on the host
+
+Confirmed: `recover` called `vm::state(...)?` for every orb unit, and the job
+observed the orb's state before pause and delete with `?` too. A VMM that
+accepts the connection and never answers (`SIGSTOP`, a deadlock, heavy
+`MemoryHigh` throttling) made `vm.info` time out after 5 s, and that error
+ended every job on the host, including the pause or delete that would clear
+it.
+
+- `recover` keeps a unit only on a `Running` answer. Any other answer, or an
+  error, stops it; an error also logs one `warn` event with the error.
+  Cost, as the review said: a VMM alive but slower than the 5 s API timeout
+  is stopped.
+- `recover` returns the orbs it confirmed running. Spawn's no-op check uses
+  that instead of asking the VMM a second time, and the job's `state_before`
+  is read from it. Pause and delete no longer observe before acting; they
+  stop, and the closing `state_after` is read once the socket is gone.
+- AGENTS.md's Failure model now says "not confirmed `Running`".
+- New matrix section 8: spawn an orb, `SIGSTOP` its VMM, delete it, check the
+  delete exits 0 within the 240 s job deadline, then spawn a second orb into
+  the freed slot. shellcheck clean. `[host]` awaiting a run.
+- The container check: clean, 29 tests. Nothing here is a pure function
+  that a unit test could reach without systemd.
