@@ -1518,3 +1518,18 @@ table (R6, R7), the Bounds rule (R5, B3), the Failure model (B1) and the
 - Crates: `jorb`'s role, and size guidance for `jorb-config-disk`.
 - Security: no `SETENV`, root only, the wrapper's cleaned environment, and
   the token kept out of subprocesses.
+
+### V3. The module check now runs the NixOS assertions
+
+Confirmed: the check read single options and never forced
+`system.build.toplevel`, so assertions did not run (D1).
+
+- The check's evidence file now starts with the toplevel's `drvPath`, with
+  its string context discarded so nothing has to be built. Evaluating it
+  forces the assertions.
+- Shown both ways, by evaluating `checks.aarch64-linux.module.drvPath` with
+  the check host's `stateImage` changed to `/var/lib/jorb/inside.img`: before
+  this commit it evaluated to a derivation; after, it fails with "services.jorb.stateImage
+  (/var/lib/jorb/inside.img) is inside stateDirectory (/var/lib/jorb), where
+  mounting it would hide it." With the real value it evaluates.
+- nixfmt clean. Building the check needs Linux.

@@ -263,7 +263,11 @@
 
               # The parts of the configuration this check is about, forced by
               # being written down.
+              # Evaluating the whole system is what runs the NixOS assertions;
+              # reading single options skips them. The derivation's path is
+              # enough, and needs nothing built.
               evaluated = pkgs.writeTextDir "evidence" ''
+                toplevel = ${builtins.unsafeDiscardStringContext host.config.system.build.toplevel.drvPath}
                 ${host.config.systemd.units."jorb-provider.service".text}
                 ${host.config.systemd.units."jorb-base-image.service".text}
                 ${host.config.systemd.units."jorb-state-image.service".text}
