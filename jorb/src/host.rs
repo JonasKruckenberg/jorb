@@ -87,18 +87,6 @@ impl HostConfig {
     pub fn slot_count(&self) -> u16 {
         self.slots.get().min(constants::MAX_SLOTS)
     }
-
-    pub fn disk(&self, orb: &OrbId) -> PathBuf {
-        self.disks_directory().join(format!("{orb}.raw"))
-    }
-
-    pub fn config_disk(&self, orb: &OrbId) -> PathBuf {
-        self.run_dir.join(format!("{orb}.cfg"))
-    }
-
-    pub fn api_socket(&self, orb: &OrbId) -> PathBuf {
-        self.run_dir.join(format!("{orb}.sock"))
-    }
 }
 
 /// A slot on the host. One orb occupies one slot, and the slot decides the
@@ -248,17 +236,12 @@ mod tests {
     }
 
     #[test]
-    fn an_orbs_paths_follow_its_id() {
+    fn the_hosts_own_paths_sit_under_its_directories() {
         let host = test_host();
-        let id = orb("amp-1");
-
         assert_eq!(host.base_image(), Path::new("/var/lib/jorb/base.raw"));
         assert_eq!(host.lock(), Path::new("/var/lib/jorb/lock"));
         assert_eq!(host.disks_directory(), Path::new("/var/lib/jorb/disks"));
         assert_eq!(host.partial_disk(), Path::new("/var/lib/jorb/disks/.tmp"));
-        assert_eq!(host.disk(&id), Path::new("/var/lib/jorb/disks/amp-1.raw"));
-        assert_eq!(host.config_disk(&id), Path::new("/run/jorb/amp-1.cfg"));
-        assert_eq!(host.api_socket(&id), Path::new("/run/jorb/amp-1.sock"));
     }
 
     #[test]

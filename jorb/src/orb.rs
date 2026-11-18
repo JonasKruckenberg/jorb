@@ -11,7 +11,7 @@
 //! killed job left behind belongs to the next job's recover.
 
 use std::fs::{File, OpenOptions};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
@@ -37,9 +37,25 @@ impl<'a> Orb<'a> {
         Self { host, id }
     }
 
+    /// This orb's disk: a reflink clone of the base image, kept across a
+    /// pause and removed by a delete.
+    pub fn disk(&self) -> PathBuf {
+        self.host.disks_directory().join(format!("{}.raw", self.id))
+    }
+
+    /// This orb's config disk, which is the whole of what the host tells it.
+    pub fn config_disk(&self) -> PathBuf {
+        self.host.run_directory().join(format!("{}.cfg", self.id))
+    }
+
+    /// The socket this orb's VMM listens on.
+    pub fn api_socket(&self) -> PathBuf {
+        self.host.run_directory().join(format!("{}.sock", self.id))
+    }
+
     /// What the VMM behind this orb's socket says about it.
     pub async fn state(&self) -> Result<VmState> {
-        Ok(Vmm::at(&self.host.api_socket(self.id))?.state().await?)
+        Ok(Vmm::at(&self.api_socket())?.state().await?)
     }
 
     /// Whether the config disk on this host already says exactly this.
@@ -47,7 +63,7 @@ impl<'a> Orb<'a> {
     /// Byte equality. The config disk has a fixed size so that this works.
     /// The contents are never logged: one of the values is the token.
     pub fn config_disk_matches(&self, wanted: &ConfigDisk) -> Result<bool> {
-        let path = self.host.config_disk(self.id);
+        let path = self.config_disk();
 
         match std::fs::read(&path) {
             Ok(existing) => Ok(existing == wanted.as_bytes()),
@@ -60,7 +76,7 @@ impl<'a> Orb<'a> {
     #[instrument(skip_all, fields(orb = %self.id))]
     pub async fn stop(&self) -> Result<()> {
         systemd::stop_orb_unit(self.id).await?;
-        remove_if_present(&self.host.api_socket(self.id))?;
+        remove_if_present(&self.api_socket())?;
 
         Ok(())
     }
@@ -72,7 +88,7 @@ impl<'a> Orb<'a> {
     /// truncated on entry instead of being trusted to be absent.
     #[instrument(skip_all, fields(orb = %self.id))]
     pub async fn ensure_disk(&self) -> Result<()> {
-        let disk = self.host.disk(self.id);
+        let disk = self.disk();
         if disk.try_exists()? {
             debug!("the disk is already there");
             return Ok(());
@@ -126,10 +142,10 @@ impl<'a> Orb<'a> {
     /// no-op.
     #[instrument(skip_all, fields(orb = %self.id))]
     pub async fn remove_disk(&self) -> Result<()> {
-        let disk = self.host.disk(self.id);
+        let disk = self.disk();
 
         remove_if_present(&disk)?;
-        remove_if_present(&self.host.config_disk(self.id))?;
+        remove_if_present(&self.config_disk())?;
 
         ensure!(
             !disk.try_exists()?,
@@ -147,8 +163,8 @@ impl<'a> Orb<'a> {
     /// here would be a second path that a kill skips anyway.
     #[instrument(skip_all, fields(orb = %self.id, slot = tracing::field::Empty))]
     pub async fn start(&self, config_disk: &ConfigDisk) -> Result<()> {
-        let socket = self.host.api_socket(self.id);
-        let config_disk_path = self.host.config_disk(self.id);
+        let socket = self.api_socket();
+        let config_disk_path = self.config_disk();
 
         // Preconditions this primitive establishes for itself.
         remove_if_present(&socket)?;
@@ -172,7 +188,7 @@ impl<'a> Orb<'a> {
             self.host.memory_mib,
         )
         .without_huge_pages()
-        .disk(&self.host.disk(self.id))
+        .disk(&self.disk())
         .read_only_disk(&config_disk_path)
         .tap(
             &slot.tap_name(),
@@ -279,13 +295,13 @@ mod tests {
         let wanted = ConfigDisk::new(Some(&"a-token".into()), None).unwrap();
         let other = ConfigDisk::new(Some(&"another-token".into()), None).unwrap();
 
-        remove_if_present(&host.config_disk(&id)).unwrap();
+        remove_if_present(&orb.config_disk()).unwrap();
         assert!(
             !orb.config_disk_matches(&wanted).unwrap(),
             "a config disk that is not there cannot match"
         );
 
-        write_config_disk(&host.config_disk(&id), &wanted).unwrap();
+        write_config_disk(&orb.config_disk(), &wanted).unwrap();
 
         assert!(orb.config_disk_matches(&wanted).unwrap());
         assert!(!orb.config_disk_matches(&other).unwrap());
@@ -295,6 +311,8 @@ mod tests {
     fn removing_a_path_that_is_not_there_is_not_a_failure() {
         let host = test_host("removal");
 
-        assert!(remove_if_present(&host.disk(&"not-here".parse().unwrap())).is_ok());
+        let id: OrbId = "not-here".parse().unwrap();
+
+        assert!(remove_if_present(&Orb::new(&host, &id).disk()).is_ok());
     }
 }

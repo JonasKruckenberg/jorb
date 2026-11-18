@@ -474,7 +474,16 @@ against `"${stateDirectory}/"`, and the module check now evaluates a host with
 - **`fixed.rs` is `constants.rs`.** It holds constants. The previous name was
   mine, twice over: `limits.rs` held things that bounded nothing, and `fixed`
   was no better.
-- **`Host` is `HostConfig`**, and it no longer allocates anything. It is this
+- **`HostConfig` holds the `JORB_*` half of an invocation**, which is the
+  trusted half, and the host-wide paths those directories imply: the base
+  image, the lock, the disks directory, the partial disk. That is its whole
+  role. Three of its methods were per-orb — `disk(orb)`, `config_disk(orb)`,
+  `api_socket(orb)` — and every caller was `orb.rs` passing `self.id`, so they
+  are `Orb`'s own now: `orb.disk()`, `orb.config_disk()`, `orb.api_socket()`.
+  An orb owning its files is why `HostConfig` looked like it had accessors for
+  things that were not its own.
+- **`Host` is `HostConfig`**, and it no longer allocates anything.
+ It is this
   machine's description: sizing, and where the files live. `lowest_free_slot`
   moved to `Slot::lowest_free(host)`, next to `Slot::is_free` and
   `Slot::all(host)`, which is where slot allocation belongs. `Slot::all` also
