@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
-use jorb_vmm::{VmBuilder, VmState, Vmm};
+use jorb_vmm::{Tap, VmShape, VmState};
 use tokio::time::sleep;
 use tracing::{debug, info, instrument};
 
@@ -57,7 +57,7 @@ impl<'a> Orb<'a> {
 
     /// What the VMM behind this orb's socket says about it.
     pub async fn state(&self) -> Result<VmState> {
-        Ok(Vmm::at(&self.api_socket())?.state().await?)
+        Ok(jorb_vmm::state(&self.api_socket()).await?)
     }
 
     /// Whether the config disk on this host already says exactly this.
@@ -180,27 +180,27 @@ impl<'a> Orb<'a> {
 
         wait_for_socket(&socket).await?;
 
-        // boot confirms the VM is running before it returns, so that is this
-        // primitive's postcondition met. The handle is dropped here: a jorb
-        // process ends while the VM it started keeps running.
-        VmBuilder::new(
-            &self.host.kernel,
-            &slot.cmdline(self.id),
-            self.host.vcpus,
-            self.host.memory_mib,
-        )
-        .without_huge_pages()
-        .disk(&self.disk())
-        .read_only_disk(&config_disk_path)
-        .tap(
-            &slot.tap_name(),
-            slot.host_address(),
-            constants::GUEST_NETMASK,
-        )
-        .free_page_reporting()
-        .boot(&Vmm::at(&socket)?)
-        .await
-        .context("creating and booting the VM")?;
+        let cmdline = slot.cmdline(self.id);
+        let tap = slot.tap_name();
+        let shape = VmShape {
+            kernel: &self.host.kernel,
+            cmdline: &cmdline,
+            cpus: self.host.vcpus,
+            memory_mib: self.host.memory_mib,
+            root_disk: &self.disk(),
+            read_only_disk: &config_disk_path,
+            tap: Tap {
+                name: &tap,
+                host_address: slot.host_address(),
+                netmask: constants::GUEST_NETMASK,
+            },
+        };
+
+        // Returns once the VMM reports the VM running, which is this
+        // primitive's postcondition.
+        jorb_vmm::boot(&socket, &shape)
+            .await
+            .context("creating and booting the VM")?;
 
         info!(slot = slot.index(), "running");
 

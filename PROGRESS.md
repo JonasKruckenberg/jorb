@@ -1141,3 +1141,24 @@ trailing whitespace would not read back as written. jorb-init also used
   name it.
 - The container check: clean, 30 tests (18 `jorb`, 6 `jorb-config-disk`,
   4 `jorb-init`, 2 `jorb-vmm`).
+
+### R7. Narrow jorb-vmm to what is used
+
+Confirmed: `boot` returned a `Vm` every caller dropped; `huge_pages` set
+both `hugepages` and `thp` and defaulted to true, so a builder without
+`without_huge_pages()` asked for hugetlbfs; and the crate had a `Vmm`
+handle, where AGENTS.md says an API socket is the only name for a VM.
+
+- The owner chose (2026-11-18) to replace the builder. `VmShape` is a struct
+  of exactly the fixed fields: kernel, cmdline, cpus, memory, a writable root
+  disk, a read-only disk and a `Tap`, all required. Huge pages are always
+  off and free page reporting always on; neither is a field.
+- The crate's interface is `boot(socket, &shape) -> Result<()>` and
+  `state(socket) -> Result<VmState>`. `Vmm` and `Vm` are gone; each call
+  builds its client from the socket. That is what AGENTS.md and PLAN.md T4
+  described all along (see D1).
+- `git diff jorb-vmm/tests/vm-shape.json`: empty. The golden JSON is
+  unchanged.
+- The boot example and AGENTS.md's Crates row follow. PLAN.md T4 still shows
+  the builder; it is the plan as written and is left as history.
+- The container check: clean, 30 tests.

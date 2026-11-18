@@ -1,5 +1,4 @@
-//! Boots the fixed VM shape on a Cloud Hypervisor that is already listening,
-//! which is what G4's harness does by hand.
+//! Boots the fixed VM shape on a Cloud Hypervisor that is already listening.
 //!
 //! Usage: `cargo run -p jorb-vmm --example boot -- <socket> <kernel> <root disk> <config disk> <tap> <slot>`
 #![allow(
@@ -11,9 +10,9 @@ use std::env;
 use std::error::Error;
 use std::net::Ipv4Addr;
 use std::num::{NonZeroU8, NonZeroU32};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use jorb_vmm::{VmBuilder, Vmm};
+use jorb_vmm::{Tap, VmShape};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -29,26 +28,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
          ip=10.77.{slot}.2::10.77.{slot}.1:255.255.255.252:boot-example:eth0:off:1.1.1.1:9.9.9.9"
     );
 
-    let vmm = Vmm::at(socket)?;
-    let vm = VmBuilder::new(
-        Path::new(kernel),
-        &cmdline,
-        NonZeroU8::new(4).ok_or("four is not zero")?,
-        NonZeroU32::new(6144).ok_or("6144 is not zero")?,
-    )
-    .without_huge_pages()
-    .disk(root_disk)
-    .read_only_disk(config_disk)
-    .tap(
-        &tap,
-        Ipv4Addr::new(10, 77, slot, 1),
-        Ipv4Addr::new(255, 255, 255, 252),
-    )
-    .free_page_reporting()
-    .boot(&vmm)
-    .await?;
+    let shape = VmShape {
+        kernel,
+        cmdline: &cmdline,
+        cpus: NonZeroU8::new(4).ok_or("four is not zero")?,
+        memory_mib: NonZeroU32::new(6144).ok_or("6144 is not zero")?,
+        root_disk,
+        read_only_disk: config_disk,
+        tap: Tap {
+            name: &tap,
+            host_address: Ipv4Addr::new(10, 77, slot, 1),
+            netmask: Ipv4Addr::new(255, 255, 255, 252),
+        },
+    };
 
-    println!("{:?}", vm.state().await?);
+    jorb_vmm::boot(socket, &shape).await?;
+    println!("{:?}", jorb_vmm::state(socket).await?);
 
     Ok(())
 }

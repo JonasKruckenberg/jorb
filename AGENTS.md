@@ -108,7 +108,7 @@ Units are `jorb-orb-<id>.service` inside `jorb.slice`, started with `systemd-run
 
 | Crate | Role | Runtime dependencies (allowlist) |
 |---|---|---|
-| `jorb-vmm` (lib) | Generated Cloud Hypervisor client behind `VmBuilder` and `state`. Knows nothing about systemd, slots or Amp | `progenitor-client`, `reqwest` (no default features, `json`), `serde`, `serde_json`, `thiserror`; dev: `tokio`; build: `progenitor` |
+| `jorb-vmm` (lib) | Generated Cloud Hypervisor client behind `VmShape`, `boot(socket, shape)` and `state(socket)`. Knows nothing about systemd, slots or Amp | `progenitor-client`, `reqwest` (no default features, `json`), `serde`, `serde_json`, `thiserror`; dev: `tokio`; build: `progenitor` |
 | `jorb-config-disk` (lib) | The config disk's size, encoder and parser, shared by both binaries so they cannot disagree | none |
 | `jorb` (bin) | Dispatch: env to job, lock, primitives, operations | `jorb-vmm`, `jorb-config-disk`, `tokio` (current-thread), `tracing`, `tracing-subscriber` (json), `anyhow`, `rustix`, `secrecy` |
 | `jorb-init` (bin, static musl) | Guest PID 1. Synchronous | `jorb-config-disk`, `rustix`, `tracing`, `tracing-subscriber` (json), `anyhow` |
