@@ -11,7 +11,7 @@
 //! truthful state for the host to see. There is no shutdown path: pause is a
 //! power cut, and ext4 replays its journal on the next boot.
 
-mod limits;
+mod fixed;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -40,15 +40,15 @@ fn main() -> ! {
 }
 
 /// Everything that has to be true before bootstrap starts, in order, then
-/// bootstrap itself. Returns its pid, which is the one child reap reports on.
+/// bootstrap itself. Returns its pid: the one child reap reports on.
 fn start_bootstrap() -> Result<u32> {
     mount_filesystems()?;
     shorten_the_writeback_window()?;
     write_resolv_conf()?;
 
     let environment = environment(
-        Path::new(limits::ENV_FILE),
-        Path::new(limits::CONFIG_DISK_DEVICE),
+        Path::new(fixed::ENV_FILE),
+        Path::new(fixed::CONFIG_DISK_DEVICE),
     )?;
 
     spawn_bootstrap(&environment)
@@ -61,7 +61,7 @@ fn mount_filesystems() -> Result<()> {
         ("proc", "/proc", "proc", None),
         ("sysfs", "/sys", "sysfs", None),
         ("devpts", "/dev/pts", "devpts", None),
-        ("tmpfs", "/dev/shm", "tmpfs", Some(limits::DEV_SHM_OPTIONS)),
+        ("tmpfs", "/dev/shm", "tmpfs", Some(fixed::DEV_SHM_OPTIONS)),
         ("tmpfs", "/run", "tmpfs", None),
     ] {
         fs::create_dir_all(target).with_context(|| format!("creating {target}"))?;
@@ -86,7 +86,7 @@ fn shorten_the_writeback_window() -> Result<()> {
         "/proc/sys/vm/dirty_expire_centisecs",
         "/proc/sys/vm/dirty_writeback_centisecs",
     ] {
-        fs::write(knob, limits::DIRTY_WRITEBACK_CENTISECS.to_string())
+        fs::write(knob, fixed::DIRTY_WRITEBACK_CENTISECS.to_string())
             .with_context(|| format!("writing {knob}"))?;
     }
 
@@ -112,8 +112,8 @@ fn environment(env_file: &Path, config_disk: &Path) -> Result<BTreeMap<String, S
         fs::read_to_string(env_file).with_context(|| format!("reading {}", env_file.display()))?;
     let mut environment = parse_env_file(&image);
 
-    environment.insert("HOME".to_owned(), limits::GUEST_HOME.to_owned());
-    environment.insert("USER".to_owned(), limits::GUEST_USER.to_owned());
+    environment.insert("HOME".to_owned(), fixed::GUEST_HOME.to_owned());
+    environment.insert("USER".to_owned(), fixed::GUEST_USER.to_owned());
 
     let disk =
         fs::read(config_disk).with_context(|| format!("reading {}", config_disk.display()))?;
@@ -148,9 +148,9 @@ fn parse_env_file(contents: &str) -> BTreeMap<String, String> {
 fn parse_config_disk(disk: &[u8]) -> Result<BTreeMap<String, String>> {
     let end = disk
         .iter()
-        .take(limits::CONFIG_DISK_BYTES)
+        .take(fixed::CONFIG_DISK_BYTES)
         .position(|byte| *byte == 0)
-        .unwrap_or(disk.len().min(limits::CONFIG_DISK_BYTES));
+        .unwrap_or(disk.len().min(fixed::CONFIG_DISK_BYTES));
 
     let contents = std::str::from_utf8(&disk[..end]).context("the config disk is not UTF-8")?;
 
@@ -162,25 +162,25 @@ fn parse_config_disk(disk: &[u8]) -> Result<BTreeMap<String, String>> {
 /// The child keeps running after this returns: it is the guest's whole
 /// purpose, and PID 1 only reaps from here on.
 fn spawn_bootstrap(environment: &BTreeMap<String, String>) -> Result<u32> {
-    let child = Command::new(limits::SETPRIV)
+    let child = Command::new(fixed::SETPRIV)
         .args([
-            &format!("--reuid={}", limits::GUEST_USER),
-            &format!("--regid={}", limits::GUEST_USER),
+            &format!("--reuid={}", fixed::GUEST_USER),
+            &format!("--regid={}", fixed::GUEST_USER),
             "--init-groups",
             "--",
-            limits::AMP,
+            fixed::AMP,
             "orb",
             "bootstrap",
         ])
-        .current_dir(limits::GUEST_HOME)
+        .current_dir(fixed::GUEST_HOME)
         .env_clear()
         .envs(environment)
         .spawn()
-        .with_context(|| format!("spawning {} through {}", limits::AMP, limits::SETPRIV))?;
+        .with_context(|| format!("spawning {} through {}", fixed::AMP, fixed::SETPRIV))?;
 
     info!(
         pid = child.id(),
-        user = limits::GUEST_USER,
+        user = fixed::GUEST_USER,
         "bootstrap started"
     );
 
@@ -192,8 +192,7 @@ fn spawn_bootstrap(environment: &BTreeMap<String, String>) -> Result<u32> {
 /// The one unbounded loop in jorb, and the reason this function returns `!`:
 /// PID 1 inherits every orphan in the guest, and a guest ends by being
 /// switched off, not by this returning. Bootstrap exiting is logged and
-/// nothing more; the orb stays up until the host stops it, which is what
-/// `pause` does.
+/// nothing more; the orb stays up until the host stops it, as `pause` does.
 fn reap(bootstrap: u32) -> ! {
     loop {
         match waitpid(None, WaitOptions::empty()) {
@@ -221,8 +220,8 @@ fn reap(bootstrap: u32) -> ! {
     }
 }
 
-/// Switches the guest off. The host sees the unit stop, which is the truthful
-/// state when the guest has nothing left to do.
+/// Switches the guest off. The host sees the unit stop, the truthful state
+/// for a guest with nothing left to do.
 fn power_off() -> ! {
     if let Err(error) = reboot(RebootCommand::PowerOff) {
         error!(error = error.to_string(), "powering off failed");
@@ -230,9 +229,9 @@ fn power_off() -> ! {
 
     // The syscall does not return when it works, so reaching here means it
     // failed. PID 1 exiting panics the kernel, which stops the VM and so the
-    // unit, which is what the host was going to see anyway. Looping here would
-    // be a second unbounded loop, and the reap loop is the only one jorb
-    // allows itself.
+    // unit: what the host was going to see anyway. Looping here would be a
+    // second unbounded loop, and the reap loop is the only one jorb allows
+    // itself.
     std::process::exit(1)
 }
 
@@ -251,7 +250,7 @@ mod tests {
     /// A config disk as jorb writes it: lines, then NUL padding to the block.
     fn config_disk(contents: &str) -> Vec<u8> {
         let mut disk = contents.as_bytes().to_vec();
-        disk.resize(limits::CONFIG_DISK_BYTES, 0);
+        disk.resize(fixed::CONFIG_DISK_BYTES, 0);
         disk
     }
 

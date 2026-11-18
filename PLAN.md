@@ -26,7 +26,7 @@ Each is resolved by a gate in T3. Until then, code that depends on one carries `
 ## Milestone 1: foundations
 
 ### T0. Repository skeleton
-- **Deliver:** `flake.nix` (dev shell with Rust toolchain, `cloud-hypervisor`, and `CH_OPENAPI_SPEC` pointing into that package's source); Cargo workspace with `jorb-vmm`, `jorb`, `jorb-init`; `[workspace.lints]` (`unsafe_code = "forbid"`; clippy `all`, `unwrap_used`, `expect_used`, `panic`, `todo`, `dbg_macro`, `print_stdout`, `print_stderr` denied, with unwrap allowed in tests); an empty `limits.rs` at each crate root; `PROGRESS.md` with sections Status, Gate results, Open questions, Proposals. If the toolchain's clippy has an `infinite_loop` lint, deny it too (check; do not assume).
+- **Deliver:** `flake.nix` (dev shell with Rust toolchain, `cloud-hypervisor`, and `CH_OPENAPI_SPEC` pointing into that package's source); Cargo workspace with `jorb-vmm`, `jorb`, `jorb-init`; `[workspace.lints]` (`unsafe_code = "forbid"`; clippy `all`, `unwrap_used`, `expect_used`, `panic`, `todo`, `dbg_macro`, `print_stdout`, `print_stderr` denied, with unwrap allowed in tests); a `fixed.rs` at the root of `jorb` and `jorb-init` for the values the design pins down; `PROGRESS.md` with sections Status, Gate results, Open questions, Proposals. If the toolchain's clippy has an `infinite_loop` lint, deny it too (check; do not assume).
 - **Accept:** `nix flake check` passes with empty crates.
 
 ### T1. Guest kernel
@@ -43,21 +43,25 @@ Each is resolved by a gate in T3. Until then, code that depends on one carries `
 - **Deliver:** one script per gate in `tests/host/`, each printing a single PASS or FAIL line plus evidence; a Nix-built busybox ext4 test image for G4 and G5. Record every result in `PROGRESS.md`.
 - **Depends:** T1, T2.
 
-| Gate | Check |
-|---|---|
-| G1 | Free memory with the observability stack idle. Set `memoryHigh` to that minus 0.5 GiB |
-| G2 | Print `/sys/kernel/mm/transparent_hugepage/hpage_pmd_size` |
-| G3 | `/var/lib/jorb` is XFS and `cp --reflink=always` works. `[human]` creates the partition |
-| G4 | Boot kernel plus busybox through the API with the final VM shape: boots; tap up; `vda`/`vdb` order; `date` correct; console lines in `journalctl -u` |
-| G5 | In the guest, allocate then free 1 GiB; the unit's cgroup `memory.current` falls by most of it within a minute |
-| G6 | Pull the arm64 image, pin its digest, unpack; verify A7; run bootstrap with a dummy token and observe whether it forks away |
-| G7 | Start any unit in `jorb.slice`; its cgroup metrics appear in Prometheus and its journal lines in Loki |
-| G8 | Find how `amp` with `orb provider` installs on this host (nixpkgs package, or the official binary in an FHS wrapper); record the method |
+A gate answers one question about this host or about Cloud Hypervisor, and the
+answer goes in `PROGRESS.md`. A gate whose answer is settled and will not
+change is then deleted: the knowledge lives in `PROGRESS.md`, and the script
+is scaffolding. G1 (free memory), G2 (`hpage_pmd_size`) and G8 (how `amp`
+installs) went that way on 2026-11-18.
+
+| Gate | Needs | Check |
+|---|---|---|
+| boot-check | kvm | The config jorb itself sends boots: guest up, `vda`/`vdb` order, clock right. Covers A1, A2, A4 and runs on every change |
+| G3 | — | Replaced by `jorb preflight`, which probes the clone itself and tells a filesystem that cannot do it from a directory it may not write to |
+| G4 | root | The final shape through `systemd-run`: tap up, the guest takes its `ip=` address, console lines in `journalctl -u`. What is left of A3 |
+| G5 | root | In the guest, allocate then free 1 GiB; the unit's cgroup `memory.current` falls by most of it within a minute |
+| G6 | network | Pull the arm64 image, pin its digest, unpack; verify A7; run bootstrap with a dummy token and observe whether it forks away. Rerun whenever the pinned digest is bumped |
+| G7 | root | Start any unit in `jorb.slice`; its cgroup metrics appear in Prometheus and its journal lines in Loki |
 
 ## Milestone 2: components
 
-- **Deliver:** `VmBuilder` (kernel, cmdline, cpus, memory, `without_huge_pages`, `disk`, `read_only_disk`, `tap`, `free_page_reporting`, serial to stdout) with `async fn boot(self, socket) -> Result<()>` performing create then boot; `state(socket) -> Result<VmState>` answering `Absent` for a socket that is gone, dead or has no VM; a `thiserror` error enum; an `API_REQUEST_TIMEOUT` in `limits.rs` applied to every request. An API socket is the only name for a VM; there is no handle type. Nothing from the generated module is re-exported.
-- **Deliver:** `VmBuilder` (kernel, cmdline, cpus, memory, `without_huge_pages`, `disk`, `read_only_disk`, `tap`, `free_page_reporting`, serial to stdout) with `async fn boot(self, socket) -> Result<Vm>` performing create then boot; `Vm::attach(socket) -> Result<Option<Vm>>` (None when the socket is absent or refuses); `vm.state()`; a `thiserror` error enum; an `API_REQUEST_TIMEOUT` in `limits.rs` applied to every request. Nothing from the generated module is re-exported.
+### T4. `jorb-vmm` API
+- **Deliver:** `VmBuilder` (kernel, cmdline, cpus, memory, `without_huge_pages`, `disk`, `read_only_disk`, `tap`, `free_page_reporting`, serial to stdout) with `async fn boot(self, socket) -> Result<()>` performing create then boot; `state(socket) -> Result<VmState>` answering `Absent` for a socket that is gone, dead or has no VM; a `thiserror` error enum; an `API_REQUEST_TIMEOUT` at the crate root applied to every request. An API socket is the only name for a VM; there is no handle type. Nothing from the generated module is re-exported.
 - **Accept:** golden test comparing the builder's JSON for the fixed VM shape against a checked-in file; a `//!` paragraph on the crate root stating what the crate refuses to know; `[host]` example boots the G4 image.
 
 Illustrative shape, not a specification:
@@ -92,7 +96,7 @@ let running = jorb_vmm::state(&socket).await? == VmState::Running;
   - `remove_disk`: unlink if present; remove the config file.
   - `start`: remove any stale socket; write the config disk; pick the lowest free slot; `systemd-run --collect --unit jorb-orb-<id> --slice jorb.slice -p Type=exec -p TimeoutStopSec=5 -p OOMScoreAdjust=500` running Cloud Hypervisor with the API socket; wait up to `API_SOCKET_WAIT` for the socket; `VmBuilder::boot`; postcondition `state == Running`. On failure, return the error and clean nothing up; the next job's `recover` removes the debris.
   - Operations as the compositions in `AGENTS.md`; `main` takes the lock, opens the root span, runs `recover` then the operation under `JOB_DEADLINE`, maps the result to the exit code.
-  - `limits.rs` holding every size, count and duration used above (the `5` in the `systemd-run` line is `UNIT_STOP_TIMEOUT`); each subprocess runs under a timeout.
+  - `fixed.rs` holding every size, count, duration and fixed name used above (the `5` in the `systemd-run` line is `UNIT_STOP_TIMEOUT`); each subprocess runs under a timeout.
 - **Logging:** root span `job` with `op` and `orb`; one `#[instrument]` span per primitive (skip secrets); a final event with `outcome`, `state_before`, `state_after`.
 - **Accept:** clippy and tests pass; a test proves the token never appears in `Debug` or log output of `Request`; behaviour is verified in T11.
 

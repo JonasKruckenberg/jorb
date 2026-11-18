@@ -10,8 +10,6 @@ set -u
 PATH=/bin
 export PATH
 
-/bin/busybox --install -s /bin 2>/dev/null
-
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t tmpfs -o size=1G tmpfs /run

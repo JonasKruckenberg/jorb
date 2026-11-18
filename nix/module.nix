@@ -32,8 +32,23 @@ let
     "AMP_URL"
   ];
 
-  # The root side: the only program the sudo rule allows, and the only place
-  # JORB_* comes from.
+  # The host as jorb is told about it. Defined once: the root side of the sudo
+  # rule and the setup unit are the two things that run jorb as root, and they
+  # must agree about which host this is.
+  hostEnvironment = {
+    JORB_SLOTS = toString cfg.slots;
+    JORB_VCPUS = toString cfg.vcpus;
+    JORB_MEMORY_MIB = toString cfg.memoryMiB;
+    JORB_KERNEL = "${cfg.kernel}";
+    JORB_STATE_DIR = cfg.stateDirectory;
+    JORB_RUN_DIR = cfg.runtimeDirectory;
+  };
+
+  # The root side: the only program the sudo rule allows.
+  #
+  # It takes no arguments and passes none on. jorb's commands create
+  # filesystems and pull images, and the provider is closed-source and
+  # unprivileged, so the sudo rule reaches one job and nothing else.
   rootSide = pkgs.writeShellApplication {
     name = "jorb-root";
     runtimeInputs = [
@@ -43,12 +58,9 @@ let
     text = ''
       # Set, not defaulted: whatever the caller had to say about the host is
       # not interesting.
-      export JORB_SLOTS=${toString cfg.slots}
-      export JORB_VCPUS=${toString cfg.vcpus}
-      export JORB_MEMORY_MIB=${toString cfg.memoryMiB}
-      export JORB_KERNEL=${cfg.kernel}
-      export JORB_STATE_DIR=${cfg.stateDirectory}
-      export JORB_RUN_DIR=${cfg.runtimeDirectory}
+      ${lib.concatStringsSep "\n" (
+        lib.mapAttrsToList (name: value: "export ${name}=${lib.escapeShellArg value}") hostEnvironment
+      )}
 
       exec ${cfg.package}/bin/jorb
     '';
@@ -101,8 +113,10 @@ in
       description = ''
         `MemoryHigh` for `jorb.slice`, which is the host's real protection:
         past it the orbs are throttled and reclaimed into zram rather than
-        taking the host down. `tests/host/g1-free-memory.sh` prints the
-        absolute figure for this host.
+        taking the host down. For an absolute figure, read `MemAvailable`
+        from `/proc/meminfo` with the observability stack already running and
+        take a little under it. On this host that was 11797M against 12309
+        MiB available, out of 15673 MiB total.
       '';
     };
 
@@ -160,6 +174,29 @@ in
       type = types.str;
       default = "/run/jorb";
       description = "Where the config disks and API sockets live.";
+    };
+
+    stateImage = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "/var/lib/jorb.img";
+      description = ''
+        An XFS image to create and mount on `stateDirectory`, for a host whose
+        filesystem cannot reflink. `jorb init` makes it if it is missing and
+        mounts it before the provider starts; leave it null on a host where
+        `stateDirectory` is already XFS or btrfs.
+
+        It has to sit outside `stateDirectory`, or the mount would hide it.
+      '';
+    };
+
+    stateImageGiB = mkOption {
+      type = types.ints.positive;
+      default = 128;
+      description = ''
+        How big that image claims to be. It is sparse, so this is what the
+        filesystem believes it has rather than what it costs.
+      '';
     };
 
     observability = {
@@ -222,6 +259,19 @@ in
     })
 
     (mkIf cfg.enable {
+      assertions = [
+        {
+          assertion = cfg.stateImage == null || !lib.hasPrefix "/" cfg.stateImage;
+          message =
+            "services.jorb.stateImage (${toString cfg.stateImage}) is inside"
+            + " stateDirectory (${cfg.stateDirectory}), where mounting it would hide it.";
+        }
+        {
+          assertion = cfg.slots <= 256;
+          message = "services.jorb.slots is ${toString cfg.slots}; a slot is a byte of 10.77.S.0/30, so 256 is the most there can be.";
+        }
+      ];
+
       users.users.jorb = {
         isSystemUser = true;
         group = "jorb";
@@ -257,13 +307,17 @@ in
       systemd.services.jorb-provider = {
         description = "Amp orb provider";
         wantedBy = [ "multi-user.target" ];
-        after = [ "network-online.target" ];
+        after = [
+          "network-online.target"
+          "jorb-setup.service"
+        ];
         wants = [ "network-online.target" ];
+        # A provider on a host that is not ready would take jobs it cannot
+        # finish, so it waits for the unit that makes it ready and fails with
+        # it.
+        requires = [ "jorb-setup.service" ];
 
         serviceConfig = {
-          # + runs it as root: building the base image needs to unpack an image
-          # with its ownership and setuid bits intact.
-          ExecStartPre = "+${cfg.prepareImagePackage}/bin/jorb-prepare-image";
           ExecStart = "${cfg.ampPackage}/bin/amp orb provider ${dispatch}/bin/jorb-dispatch";
           EnvironmentFile = cfg.tokenFile;
           User = "jorb";
@@ -273,7 +327,6 @@ in
           RestartSec = 5;
         };
 
-        environment.JORB_STATE_DIR = cfg.stateDirectory;
         path = [ pkgs.sudo ];
       };
 
@@ -287,11 +340,36 @@ in
         };
       };
 
-      systemd.tmpfiles.rules = [
-        "d ${cfg.stateDirectory} 0700 root root -"
-        "d ${cfg.stateDirectory}/disks 0700 root root -"
-        "d ${cfg.runtimeDirectory} 0700 root root -"
-      ];
+      # One unit makes the host ready, and it is the same command a host
+      # without Nix runs: the directories, a filesystem that can clone, the
+      # base image, and preflight to prove it. tmpfiles used to create the
+      # directories, which meant two owners for one job.
+      systemd.services.jorb-setup = {
+        description = "Prepare this host to run orbs";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "network-online.target" ];
+        wants = [ "network-online.target" ];
+
+        environment = hostEnvironment;
+        path = [
+          cfg.cloudHypervisorPackage
+          cfg.prepareImagePackage
+          config.systemd.package
+          pkgs.util-linux
+          pkgs.xfsprogs
+        ];
+
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart =
+            "${cfg.package}/bin/jorb init"
+            + lib.optionalString (cfg.stateImage != null) (
+              " --create-state-image --state-image ${cfg.stateImage}"
+              + " --state-image-gib ${toString cfg.stateImageGiB}"
+            );
+        };
+      };
 
       # An orb that is throttled by MemoryHigh reclaims into zram rather than
       # onto a disk, which is both faster and kinder to the SSD.

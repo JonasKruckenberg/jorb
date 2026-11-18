@@ -1,26 +1,52 @@
 //! A Cloud Hypervisor client, narrowed to the one VM shape jorb boots.
 //!
 //! The crate refuses to know about systemd, slots, orbs, Amp or where any of
-//! the paths it is handed came from. It takes a kernel, a cmdline, disks and a
-//! tap, and boots that shape. Nothing from the generated client is
+//! the paths it is handed came from. Nothing from the generated client is
 //! re-exported, so Cloud Hypervisor's API surface stays an implementation
 //! detail and the rest of jorb can only express the shape this crate allows.
 //!
-//! An API socket is the only name for a VM here. There is no handle type: a
-//! handle would be a second way to say "this VM", and the one question anyone
-//! asks is [`state`]. There is no method to stop or delete either, because
-//! jorb is crash-only and a VM stops because its unit stops. See the failure
-//! model in `AGENTS.md`.
+//! Three types, in the order a caller meets them. [`Vmm`] is the hypervisor
+//! listening on an API socket, which may or may not have been given a VM.
+//! [`VmBuilder`] assembles the shape jorb boots. [`Vm`] is what booting
+//! returns, and it exists only for a VM the same call confirmed running.
+//!
+//! [`Vm`] has no `Drop`. A VM outlives the jorb process that booted it: its
+//! lifetime belongs to the systemd unit, and jorb is crash-only, so tidying up
+//! on the way out would be a second path that a kill skips. That is also why
+//! there is no way to stop or delete a VM here. See the failure model in
+//! `AGENTS.md`.
 
 mod generated;
-mod limits;
 
 use std::fmt::Display;
 use std::net::Ipv4Addr;
 use std::num::{NonZeroU8, NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use generated::types;
+
+/// How long one request to Cloud Hypervisor's API may take, connection
+/// included.
+///
+/// The API is a unix socket on the same host and every call jorb makes is a
+/// few hundred bytes of JSON, so anything slower than this is a VMM that has
+/// stopped answering rather than one that is busy. Short enough that a job can
+/// make several calls and still finish well inside Amp's five minutes.
+const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Cloud Hypervisor sizes memory in bytes; jorb thinks in MiB.
+const BYTES_PER_MIB: i64 = 1024 * 1024;
+
+/// A Cloud Hypervisor listening on an API socket.
+///
+/// Holding one says nothing about whether anything is listening, or whether a
+/// VM was ever created: that is what [`Vmm::state`] is for.
+#[derive(Debug)]
+pub struct Vmm {
+    socket: PathBuf,
+    client: generated::Client,
+}
 
 /// The VM shape jorb boots, assembled one piece at a time.
 ///
@@ -37,6 +63,15 @@ pub struct VmBuilder {
     disks: Vec<Disk>,
     tap: Option<Tap>,
     free_page_reporting: bool,
+}
+
+/// A VM that was created, booted, and reported running by the VMM it runs on.
+///
+/// Borrowing the [`Vmm`] is what keeps the two from drifting apart: the VM
+/// cannot outlive the client that knows how to reach it.
+#[derive(Debug)]
+pub struct Vm<'a> {
+    vmm: &'a Vmm,
 }
 
 #[derive(Debug, Clone)]
@@ -99,39 +134,73 @@ pub enum Error {
         source: Box<progenitor_client::Error>,
     },
 
+    /// Create and boot both succeeded and the VMM still does not report a
+    /// running VM, so there is nothing to hand back.
+    #[error("the VM on {socket} is {state:?} rather than running after being booted")]
+    NotRunning { socket: PathBuf, state: VmState },
+
     /// A piece of the VM configuration was not accepted by the generated
     /// types, which means this crate asked for something it cannot express.
     #[error("the VM configuration could not be assembled: {message}")]
     Configuration { message: String },
 }
 
-/// What the VMM behind `socket` says about its VM, in one request.
-///
-/// Every way of having no VM answers [`VmState::Absent`], so a caller that
-/// wants to know whether an orb is up has one question to ask and one value to
-/// compare against.
-pub async fn state(socket: &Path) -> Result<VmState, Error> {
-    let exists = socket.try_exists().map_err(|source| Error::Socket {
-        socket: socket.to_path_buf(),
-        source,
-    })?;
-    if !exists {
-        return Ok(VmState::Absent);
+impl Vmm {
+    /// Binds a client to `socket`. No request is made here.
+    pub fn at(socket: &Path) -> Result<Self, Error> {
+        let client = reqwest::Client::builder()
+            .unix_socket(socket)
+            .timeout(API_REQUEST_TIMEOUT)
+            .connect_timeout(API_REQUEST_TIMEOUT)
+            .build()
+            .map_err(|source| Error::Transport {
+                socket: socket.to_path_buf(),
+                source,
+            })?;
+
+        Ok(Self {
+            socket: socket.to_path_buf(),
+            // The host part of the URL is never resolved: every connection
+            // goes to the socket the client was built with.
+            client: generated::Client::new_with_client("http://localhost/api/v1", client),
+        })
     }
 
-    match client(socket)?.vm_info().send().await {
-        Ok(info) => Ok(VmState::from(info.into_inner().state)),
-        // A socket with no listener is debris a dead job left behind.
-        Err(progenitor_client::Error::CommunicationError(source)) if source.is_connect() => {
-            Ok(VmState::Absent)
+    /// What this VMM says about its VM, in one request.
+    ///
+    /// Every way of having no VM answers [`VmState::Absent`], so a caller has
+    /// one question to ask and one value to compare against.
+    pub async fn state(&self) -> Result<VmState, Error> {
+        let exists = self.socket.try_exists().map_err(|source| Error::Socket {
+            socket: self.socket.clone(),
+            source,
+        })?;
+        if !exists {
+            return Ok(VmState::Absent);
         }
-        // The VMM answers 404 until a VM is created on it.
-        Err(progenitor_client::Error::ErrorResponse(response))
-            if response.status() == reqwest::StatusCode::NOT_FOUND =>
-        {
-            Ok(VmState::Absent)
+
+        match self.client.vm_info().send().await {
+            Ok(info) => Ok(VmState::from(info.into_inner().state)),
+            // A socket with no listener is debris a dead job left behind.
+            Err(progenitor_client::Error::CommunicationError(source)) if source.is_connect() => {
+                Ok(VmState::Absent)
+            }
+            // The VMM answers 404 until a VM is created on it.
+            Err(progenitor_client::Error::ErrorResponse(response))
+                if response.status() == reqwest::StatusCode::NOT_FOUND =>
+            {
+                Ok(VmState::Absent)
+            }
+            Err(source) => Err(self.failed("vm.info", source)),
         }
-        Err(source) => Err(failed(socket, "vm.info", source)),
+    }
+
+    fn failed(&self, operation: &'static str, source: progenitor_client::Error) -> Error {
+        Error::Request {
+            socket: self.socket.clone(),
+            operation,
+            source: Box::new(source),
+        }
     }
 }
 
@@ -175,8 +244,8 @@ impl VmBuilder {
 
     /// Adds a read-only disk, in the same order as [`VmBuilder::disk`].
     //
-    // ASSUMES A2: disks reach the guest in the order they are attached, so
-    // the root disk is /dev/vda and the config disk /dev/vdb. G4 checks it.
+    // A2, verified 2026-11-18: disks reach the guest in attach order, so the
+    // root disk is /dev/vda and the config disk /dev/vdb.
     #[must_use]
     pub fn read_only_disk(mut self, path: &Path) -> Self {
         self.disks.push(Disk {
@@ -201,39 +270,49 @@ impl VmBuilder {
     /// Asks the guest's balloon to report pages it frees, so freed guest
     /// memory stops being charged to the host.
     //
-    // ASSUMES A5: free page reporting actually returns the memory to the
-    // host rather than only telling the guest it may. G5 checks it.
+    // A5, verified by G5 on 2026-11-18: reporting returns the memory to the
+    // host rather than only telling the guest it may.
     #[must_use]
     pub fn free_page_reporting(mut self) -> Self {
         self.free_page_reporting = true;
         self
     }
 
-    /// Creates the VM on the Cloud Hypervisor listening at `socket`, then
-    /// boots it.
+    /// Creates the VM on `vmm`, boots it, and asks the VMM whether it is
+    /// running before handing back a [`Vm`].
     ///
-    /// Returning nothing is the point: asking the VMM is the only honest way
-    /// to learn that a VM is running, and [`state`] is where that question
-    /// goes. Nothing is cleaned up on failure, on purpose; the next job's
-    /// recover removes whatever is left.
-    pub async fn boot(self, socket: &Path) -> Result<(), Error> {
-        let client = client(socket)?;
+    /// The last step is the point: create and boot can both be accepted and
+    /// still leave a VM that is not running, and a caller holding a [`Vm`]
+    /// should not have to ask again. jorb discards the [`Vm`] it gets, because
+    /// its own job ends while the VM keeps running.
+    ///
+    /// Nothing is cleaned up on failure, on purpose; the next job's recover
+    /// removes whatever is left.
+    pub async fn boot<'v>(self, vmm: &'v Vmm) -> Result<Vm<'v>, Error> {
         let configuration = self.configuration()?;
 
-        client
+        vmm.client
             .create_vm()
             .body(configuration)
             .send()
             .await
-            .map_err(|source| failed(socket, "vm.create", source))?;
+            .map_err(|source| vmm.failed("vm.create", source))?;
 
-        client
+        vmm.client
             .boot_vm()
             .send()
             .await
-            .map_err(|source| failed(socket, "vm.boot", source))?;
+            .map_err(|source| vmm.failed("vm.boot", source))?;
 
-        Ok(())
+        let state = vmm.state().await?;
+        if state != VmState::Running {
+            return Err(Error::NotRunning {
+                socket: vmm.socket.clone(),
+                state,
+            });
+        }
+
+        Ok(Vm { vmm })
     }
 
     /// The VM shape as Cloud Hypervisor's API wants it.
@@ -245,7 +324,13 @@ impl VmBuilder {
             disks.push(assembled(
                 types::DiskConfig::builder()
                     .path(Some(path_string(&disk.path)))
-                    .readonly(disk.read_only),
+                    .readonly(disk.read_only)
+                    // Cloud Hypervisor 54.1 refuses to boot a disk whose
+                    // image type it was not told ("Image type required for
+                    // disk", a 400 on vm.boot). Every disk jorb attaches is a
+                    // raw file: the base image, its reflink clones, and the
+                    // config disk.
+                    .image_type(Some(types::ImageType::Raw)),
             )?);
         }
 
@@ -273,7 +358,7 @@ impl VmBuilder {
                 )?))
                 .memory(Some(assembled(
                     types::MemoryConfig::builder()
-                        .size(i64::from(self.memory_mib.get()) * limits::BYTES_PER_MIB)
+                        .size(i64::from(self.memory_mib.get()) * BYTES_PER_MIB)
                         .hugepages(self.huge_pages)
                         .thp(self.huge_pages),
                 )?))
@@ -294,32 +379,11 @@ impl VmBuilder {
     }
 }
 
-/// Binds a client to the socket. No request is made, so this says nothing
-/// about whether anything is listening.
-fn client(socket: &Path) -> Result<generated::Client, Error> {
-    let http = reqwest::Client::builder()
-        .unix_socket(socket)
-        .timeout(limits::API_REQUEST_TIMEOUT)
-        .connect_timeout(limits::API_REQUEST_TIMEOUT)
-        .build()
-        .map_err(|source| Error::Transport {
-            socket: socket.to_path_buf(),
-            source,
-        })?;
-
-    // The host part of the URL is never resolved: every connection goes to
-    // the socket the client was built with.
-    Ok(generated::Client::new_with_client(
-        "http://localhost/api/v1",
-        http,
-    ))
-}
-
-fn failed(socket: &Path, operation: &'static str, source: progenitor_client::Error) -> Error {
-    Error::Request {
-        socket: socket.to_path_buf(),
-        operation,
-        source: Box::new(source),
+impl Vm<'_> {
+    /// What the VMM says about this VM now, which may no longer be running: a
+    /// guest can switch itself off, and the host can stop its unit.
+    pub async fn state(&self) -> Result<VmState, Error> {
+        self.vmm.state().await
     }
 }
 
@@ -378,7 +442,7 @@ mod tests {
     }
 
     /// The golden file carries every field Cloud Hypervisor defaults, disk
-    /// order included, which is what A2 rests on.
+    /// order included. A2 rests on that order.
     #[test]
     fn the_fixed_shape_is_the_checked_in_json() {
         let sent = serde_json::to_value(fixed_shape().configuration().unwrap()).unwrap();
@@ -393,11 +457,12 @@ mod tests {
 
     #[test]
     fn a_socket_that_is_not_there_has_no_vm() {
+        let vmm = Vmm::at(Path::new("/run/jorb/definitely-not-here.sock")).unwrap();
         let state = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(state(Path::new("/run/jorb/definitely-not-here.sock")))
+            .block_on(vmm.state())
             .unwrap();
 
         assert_eq!(state, VmState::Absent);

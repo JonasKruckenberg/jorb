@@ -236,6 +236,8 @@
                       tokenFile = "/var/lib/secrets/jorb-provider.env";
                       memoryHigh = "11797M";
                       observability.enable = true;
+                      # Next to the directory it mounts on, not inside it.
+                      stateImage = "/var/lib/jorb.img";
                     };
 
                     # Enough of a host to evaluate, not to boot.
@@ -254,9 +256,9 @@
               # being written down.
               evaluated = pkgs.writeTextDir "evidence" ''
                 ${host.config.systemd.units."jorb-provider.service".text}
+                ${host.config.systemd.units."jorb-setup.service".text}
                 ${host.config.systemd.units."jorb.slice".text}
                 ${host.config.environment.etc.sudoers.source}
-                ${lib.concatStringsSep "\n" host.config.systemd.tmpfiles.rules}
                 net.ipv4.ip_forward = ${toString host.config.boot.kernel.sysctl."net.ipv4.ip_forward"}
                 zramSwap.enable = ${lib.boolToString host.config.zramSwap.enable}
               '';
@@ -280,6 +282,12 @@
                   [.panels[] | select(.type != "row")]
                   | all(.targets | length > 0 and all(.expr | length > 0))
                 ' ${./nix/jorb-dashboard.json} >/dev/null
+
+                # The provider must wait for the host to be made ready, and
+                # the setup unit must carry the state image through.
+                grep -q 'Requires=jorb-setup.service' "${evaluated}/evidence"
+                grep -q -- '--create-state-image --state-image /var/lib/jorb.img' \
+                  "${evaluated}/evidence"
 
                 mkdir -p "$out"
                 cat ${evaluated}/evidence > "$out/evidence"

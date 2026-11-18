@@ -85,9 +85,12 @@ vm_config() {
 			payload: { kernel: $kernel, cmdline: $cmdline },
 			cpus: { boot_vcpus: $vcpus, max_vcpus: $vcpus },
 			memory: { size: $memory, hugepages: false, thp: false, shared: false },
+			# image_type is required: without it vm.boot answers 400
+			# with "Image type required for disk". Every disk here is
+			# a raw file.
 			disks: [
-				{ path: $root_disk, readonly: false },
-				{ path: $config_disk, readonly: true }
+				{ path: $root_disk, readonly: false, image_type: "Raw" },
+				{ path: $config_disk, readonly: true, image_type: "Raw" }
 			],
 			net: [ { tap: $tap, ip: $host_address, mask: $netmask } ],
 			balloon: { size: 0, free_page_reporting: true },
@@ -171,17 +174,32 @@ start_test_vm() {
 	evidence "kernel   $kernel"
 	evidence "cmdline  $gate_cmdline"
 
-	gate_started=$(date -u '+%Y-%m-%d %H:%M:%S')
 	systemd-run --collect --unit "$gate_unit" --slice jorb.slice \
 		-p Type=exec -p TimeoutStopSec=5 -p OOMScoreAdjust=500 \
 		-- cloud-hypervisor --api-socket "$gate_socket" >/dev/null
+
+	# This run's journal and no other. Filtering by unit alone reads back
+	# whatever an earlier run of the same gate left, and the time window this
+	# replaces was worse than useless: `date -u` prints UTC while
+	# `journalctl --since` reads local time, so on a host an hour ahead of UTC
+	# the window opened an hour early and the gate found the previous run's
+	# markers on its first poll, in zero seconds.
+	gate_invocation=$(systemctl show -p InvocationID --value "$gate_unit.service")
 
 	if ! wait_for_path "$gate_socket" "${JORB_API_SOCKET_WAIT:-15}"; then
 		fail "cloud-hypervisor did not open $gate_socket"
 	fi
 
-	printf '%s' "$config" | api "$gate_socket" PUT vm.create --data-binary @- >/dev/null
-	api "$gate_socket" PUT vm.boot >/dev/null
+	# Both bodies are kept: a 400 from either carries the reason, and
+	# throwing it away leaves nothing but curl's exit code to go on.
+	if ! printf '%s' "$config" | api "$gate_socket" PUT vm.create --data-binary @- >"$gate_work/$id.create"; then
+		evidence "vm.create said: $(cat "$gate_work/$id.create")"
+		fail "vm.create was refused"
+	fi
+	if ! api "$gate_socket" PUT vm.boot >"$gate_work/$id.boot"; then
+		evidence "vm.boot said: $(cat "$gate_work/$id.boot")"
+		fail "vm.boot was refused"
+	fi
 	gate_boot_epoch=$(date -u +%s)
 }
 
@@ -199,7 +217,7 @@ wait_for_marker() {
 	local marker=$1 deadline=$2
 	local waited=0
 	while [ "$waited" -lt "$deadline" ]; do
-		journalctl -u "$gate_unit.service" --since "$gate_started" \
+		journalctl "_SYSTEMD_INVOCATION_ID=$gate_invocation" \
 			--no-pager --output cat >"$gate_journal" 2>/dev/null || true
 		if grep -q "JORB-GATE $marker" "$gate_journal"; then
 			gate_marker_wait=$waited
@@ -212,9 +230,34 @@ wait_for_marker() {
 	return 1
 }
 
-# The value a marker line carries.
+# The value a marker line carries, or nothing when the marker is absent.
+#
+# Three things are being undone here, all of them from sharing one serial
+# console with the kernel. The leading `.*` drops a kernel message that landed
+# in front of the marker; the second sed drops one that landed behind it,
+# which is why the match is on the kernel's own `[   13.102431]` timestamp;
+# and the CR is there because a serial console terminates every line CRLF, so
+# a value compared without stripping it looks identical in evidence and still
+# fails. The `|| true` matters as much: under `set -o pipefail` a missing
+# marker would otherwise kill the script where the caller's own check is what
+# should report it.
 marker() {
-	grep -m1 "JORB-GATE $1" "$gate_journal" 2>/dev/null | sed "s/^JORB-GATE $1 //"
+	grep -m1 "JORB-GATE $1" "$gate_journal" 2>/dev/null |
+		sed "s/.*JORB-GATE $1 //" |
+		sed 's/\[ *[0-9][0-9]*\.[0-9][0-9]*\].*$//' |
+		tr -d '\r' | sed 's/[[:space:]]*$//' || true
+}
+
+# The JSON event matching a pattern, with the kernel's console noise removed.
+#
+# The guest kernel and the guest's userspace share one serial console. printk
+# writes straight to the UART while jorb-init writes through the tty, so a
+# kernel message can land inside a JSON line, and it is not rare: "Freeing
+# unused kernel memory" is flushed as init starts, which is exactly when
+# jorb-init logs. The braces are what identifies the event, so whatever the
+# kernel printed either side of them is dropped.
+json_event() {
+	grep -m1 "$1" "$gate_journal" 2>/dev/null | tr -d '\r' | grep -o '{.*}' || true
 }
 
 # The memory the unit's cgroup is charged for, in bytes.

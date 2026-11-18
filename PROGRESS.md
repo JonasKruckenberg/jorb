@@ -13,7 +13,7 @@
 | T6 base image script | done. Producing the image awaits root |
 | T7 jorb types | done |
 | T8 jorb primitives | done. Behaviour is T11's to verify |
-| T9 NixOS module | done. `[human]`: wire it and a token file into the host |
+| T9 NixOS module | done. The host's state is the module's now; `[human]`: import it and provide a token file |
 | T10 observability | done. Panels returning data awaits T11's run |
 | T11 behaviour matrix | written, awaits a run as root |
 | T12 end to end | `[human]` |
@@ -27,63 +27,447 @@ the network policy that host generates.
 What is left is everything that needs root on this machine, plus the owner's
 own steps. Nothing is blocked on a decision.
 
-## What to run next, as root
+## What to run next
+
+Everything below runs from the repository root, inside `nix develop`. The
+scripts build what they need from the flake themselves.
+
+**No privileges.** Start here; it takes about fifteen seconds and it is the
+check that catches a config Cloud Hypervisor will not accept:
 
 ```sh
-# The gates that need taps, systemd-run and cgroups, in this order.
-sudo -E tests/host/g4-boot.sh
+tests/host/boot-check.sh
+```
+
+**As root.** These need taps, system-scope `systemd-run` and cgroups, and they
+read `JORB_*` from the environment, so `sudo -E` rather than plain `sudo`:
+
+```sh
+sudo -E tests/host/g3-reflink.sh          # writes into root-owned /var/lib/jorb
+sudo -E tests/host/g4-boot.sh             # the tap, the ip= address, the journal
 sudo -E tests/host/g5-free-page-reporting.sh
-sudo -E tests/host/t5-jorb-init.sh      # T5 in a real guest
+```
 
-# The behaviour matrix, all seven sections, or one at a time.
+**The real base image**, which needs the network and root, and has to exist
+before anything boots an actual orb:
+
+```sh
+sudo nix run .#jorb-prepare-image
+sudo -E tests/host/t5-jorb-init.sh        # jorb-init in a real guest
+```
+
+**The behaviour matrix**, all seven sections or one at a time. Sections 4 and 5 need things this host does not have yet: the module's nftables policy and NAT, and a zram device.
+
+```sh
 sudo -E tests/host/matrix.sh
-sudo -E tests/host/matrix.sh 4          # just the network policy, say
+sudo -E tests/host/matrix.sh 4            # just the network policy, say
+```
 
-# Once /var/lib/jorb is an XFS partition:
-sudo -E tests/host/g3-reflink.sh
-sudo nix run .#jorb-prepare-image       # the real base image, needs the network
+**Once the module and T10 are on the host:**
 
-# Once the module and T10 are on the host:
+```sh
 sudo -E tests/host/g7-observability.sh
 ```
 
-The gates read `JORB_*` from the environment, so `sudo -E` rather than plain
-`sudo`, and they build what they need from the flake themselves.
+**When the pinned Amp digest is bumped**, to re-verify A7 and A8 against the
+new image:
+
+```sh
+tests/host/g6-amp-image.sh
+```
 
 ## Gate results
 
 | Gate | Result |
 |---|---|
-| G1 | PASS. 15673 MiB total, 12309 MiB available, so `memoryHigh = 11797M` |
-| G2 | PASS. `hpage_pmd_size` is 33554432 (32 MiB), so A6 holds |
-| G3 | `/var/lib/jorb` is now an XFS mount, so the owner's step is done. The gate writes a test file into it, so the run itself still needs root |
-| G4 | awaiting root |
-| G5 | awaiting root |
+| boot-check | PASS, unprivileged, 2026-11-18. The config jorb sends boots; guest up in 14s, `/dev/vdb` is the config disk, clock within 1s |
+| G3 | PASS, reported by the owner 2026-11-18. XFS on /dev/loop0 and `cp --reflink=always` works |
+| G4 | PASS, reported by the owner 2026-11-18. With A1, A2 and A4 already settled by boot-check, that leaves the tap, the `ip=` address and the journal, so A3 holds in full |
+| G5 | PASS, reported by the owner 2026-11-18, so A5 holds |
 | G6 | PASS. A7 and A8 hold; digest recorded |
 | G7 | awaiting root, and T10's Alloy file has to be installed first |
-| G8 | PASS. A12 holds: `nixpkgs#amp-cli` has `orb provider` |
+
+Three gates were deleted on 2026-11-18, their answers being settled and
+unlikely to change. Keeping the answers and dropping the scripts:
+
+| Deleted | Answer it recorded |
+|---|---|
+| G1 free memory | 15673 MiB total, 12309 MiB available, so `memoryHigh = 11797M`. The derivation now lives in the module's `memoryHigh` description |
+| G2 huge page size | `hpage_pmd_size` is 33554432 (32 MiB), so A6 holds |
+| G8 amp-cli | A12 holds: `nixpkgs#amp-cli` has `orb provider`, and it is unfree |
 
 ### Assumptions
 
 | ID | State |
 |---|---|
-| A1 Cloud Hypervisor boots a 4K guest on a 16K host | awaiting G4 |
-| A2 disks appear as vda then vdb | awaiting G4. Marked `// ASSUMES A2` in jorb-vmm and jorb-init |
-| A3 serial is the architecture's port and reaches the journal | awaiting G4. Marked `// ASSUMES A3` in jorb's limits |
-| A4 the guest clock is right at boot | awaiting G4 |
-| A5 free page reporting returns memory to the host | awaiting G5. Marked `// ASSUMES A5` in jorb-vmm |
-| A6 the host's PMD huge page is 32 MiB | verified by G2 |
+| A1 Cloud Hypervisor boots a 4K guest on a 16K host | verified 2026-11-18, unprivileged. See "The 400" below |
+| A2 disks appear as vda then vdb | verified 2026-11-18: the guest read `JORB_GATE=...` back off /dev/vdb |
+| A3 serial is the architecture's port and reaches the journal | verified: boot-check saw the output on the VMM's stdout, G4 saw it in `journalctl -u` |
+| A4 the guest clock is right at boot | verified 2026-11-18: guest 09:28:21 against host 09:29:00 |
+| A5 free page reporting returns memory to the host | verified by G5, 2026-11-18 |
+| A6 the host's PMD huge page is 32 MiB | verified by G2, since deleted |
 | A7 the image has glibc, setpriv, user `user`, /usr/local/bin/amp | verified by G6, with one correction below |
 | A8 `amp orb bootstrap` stays in the foreground | verified by G6 |
 | A9 progenitor accepts the spec | verified by T2, with two patches |
 | A10 a progenitor client works over reqwest's unix socket | verified by T2 against a live VMM |
 | A11 Alloy's cAdvisor exporter sees /jorb.slice; the journal reaches Loki | awaiting G7. Marked `ASSUMES A11` in nix/jorb.alloy |
-| A12 an `amp` with `orb provider` is installable here | verified by G8 |
+| A12 an `amp` with `orb provider` is installable here | verified by G8, since deleted |
 
 A7 needs one correction: `/usr/local/bin/amp` in the image is a symlink to
 `/home/user/.amp/bin/amp`, which does exist in the image. jorb-init execs the
 symlink, so this works, but the binary behind it is the one Amp replaces on
 startup.
+
+## The 400, and what it cost
+
+Running the gates as root failed with `curl: (22) The requested URL returned
+error: 400`. Traced on 2026-11-18. Cloud Hypervisor 54.1 answers `vm.boot`
+with
+
+```
+["Error from API","The VM could not boot","Failed to validate config","Image type required for disk"]
+```
+
+unless every disk carries `image_type`. `DiskConfig.image_type` is an
+`ImageType` (`FlatVmdk`, `FixedVhd`, `Qcow2`, `Raw`, `Vhdx`, `Unknown`) with no
+default, and every disk jorb attaches is a raw file: the base image, its
+reflink clones and the config disk. Fixed in `jorb-vmm`'s disk builder, in the
+golden file, and in `lib.sh`'s `vm_config`.
+
+Three things worth keeping in mind from it:
+
+1. **This was jorb's bug, not the harness's.** The same field was missing from
+   what `jorb-vmm` sends, so every spawn would have failed the same way. The
+   golden test passed throughout: it compares what jorb sends against a
+   checked-in copy of what jorb sends, so it catches drift and cannot catch a
+   config that no VMM will accept.
+2. **The harness threw the answer away.** `start_test_vm` piped both API calls
+   to `/dev/null`, so the only thing left was curl's exit code. The body is
+   kept now and printed as evidence on failure.
+3. **The boot path never needed root.** `/dev/kvm` is mode 0666 on this host,
+   and `vm.create` plus `vm.boot` need no privilege beyond that: what needs
+   root is the tap, system-scope `systemd-run`, cgroup reads and writing
+   root-owned `/var/lib/jorb`. Booting the real kernel and the real test image
+   with the net section removed therefore runs unprivileged, which is how A1,
+   A2 and A4 were verified without a root shell. They had been sitting behind
+   "awaiting root" for no reason.
+
+What that run proved, with the real guest kernel and the real test image:
+
+| Fact | Evidence |
+|---|---|
+| A 4K guest boots on this 16K host | guest registered HugeTLB at 64 KiB, 2 MiB, 32 MiB and 1 GiB, which is the 4K-granule set; host `getconf PAGESIZE` is 16384 |
+| Disks arrive in attach order | `/dev/vda` and `/dev/vdb` present, `/dev/vdc` absent, and `vdb`'s first line was the config disk's |
+| The clock is right at boot | guest printed 2026-11-18 09:28:21 UTC, host was at 09:29:00 |
+| The serial line carries the guest's output | the whole boot, from `Booting Linux on physical CPU 0x0` to the init markers |
+| jorb's own config boots, not just the shell's | the golden file itself, paths substituted and `net` removed, booted to the same markers |
+
+The new check found a second bug on its first run, which is the argument for
+having it. A serial console terminates every line CRLF, so `marker` returned
+`JORB_GATE=boot-check\r` and the comparison against `JORB_GATE=boot-check`
+failed while both sides printed identically in the evidence. G4's A2 assertion
+reads the same marker the same way, so it would have failed the same way on its
+first root run, and the evidence would have shown two strings that looked
+equal. `marker` strips carriage returns now.
+
+Still needing root: the tap and therefore all of section 4's network policy,
+G5's free page reporting, G7's observability, and the journal half of A3.
+
+## What the first root run found
+
+G3, G4 and G5 passed. T5 and the matrix did not, both for reasons in the
+harness rather than in jorb.
+
+**T5: one console, two writers.** jorb-init's first JSON event came out of the
+journal with a kernel message stuck to the end of it:
+
+```
+{...,"target":"jorb_init"}[    0.897863] Freeing unused kernel memory: 4096K
+```
+
+so `jq` refused the line. The guest kernel and the guest's userspace share one
+serial console by design, and printk writes straight to the UART while
+jorb-init writes through the tty, so a kernel message can land inside a line.
+It is not even unlucky: "Freeing unused kernel memory" is flushed as init
+starts, which is exactly when jorb-init logs. Nothing can be done at the
+writing end, because the message was already queued before jorb-init ran, and
+quieting printk would cost the boot diagnostics that A3 exists to provide. So
+the reading end copes: `json_event` in `lib.sh` takes the braces out of the
+line and ignores whatever the kernel put either side of them.
+
+The dashboards are unaffected. Every Loki query in `nix/jorb-dashboard.json`
+reads `{unit="$provider_unit"}`, which is jorb's own host-side log, not a
+guest's console. A panel added over orb units later would need the same care.
+
+**The matrix: reflinks on the wrong filesystem.** It defaulted its state
+directory to `/var/tmp/jorb-matrix`, and `/var/tmp` is ext4 on this host, so
+`ioctl_ficlone` fails with EOPNOTSUPP and every `ensure_disk` fails with it.
+The symptom was `absent/spawn exited non-zero` with a `.tmp` left behind, and
+then an apparent hang, which was all seven sections waiting out their
+90-second boot deadlines for orbs that could never start. It defaults to
+`/var/lib/jorb/matrix` now, on the XFS mount, and `setup` probes for reflinks
+up front so the next filesystem surprise says so instead of arriving as a bare
+exit code. There is also a guard against pointing `JORB_MATRIX_DIR` at
+`/var/lib/jorb` itself, which `setup` would wipe.
+
+Two matrix sections still cannot pass on this host, and neither is jorb's
+fault: section 4 wants the nftables policy and the NAT that `nix/module.nix`
+installs, and T9 is still the owner's `[human]` step; section 5 wants a zram
+device, and there is none configured.
+
+A latent bug in the same file, found while fixing the above: `marker` ran a
+pipeline under `set -o pipefail`, so a missing marker killed the script
+instead of letting the caller's own check report it. Every gate that reads a
+marker was one absent line away from dying without a message.
+
+## The second root run: one missing image step, four symptoms
+
+T5 reported `amp ran as :`, and the matrix failed sections 4, 5 and 7. One
+cause under most of it: **the test image had no busybox applet symlinks.**
+
+`nix/test-init.sh` ran `busybox --install -s /bin` as its first act, so a
+guest booted `init=/init` had a userland. A guest booted `init=/jorb-init`,
+which is every orb and all of T5, had `/bin/sh` and `/usr/bin/setpriv` and
+nothing else. Nothing said so, because every missing applet failed quietly:
+
+| Symptom | What was actually missing |
+|---|---|
+| T5: `amp ran as :` | `id`, so `$(id -u):$(id -g)` was `:` |
+| Section 4: every target "unreachable", `ampcode.com` "UNREACHABLE" | `ping` and `wget`. The probes could not tell a policy that blocks from a tool that does not exist, so the section's results meant nothing either way |
+| Section 4: no `reach tap` line at all | `ip`, so the guest never worked out its own address |
+| Section 5: peak 156 MiB rather than a gigabyte | `dd`, so the workload never allocated |
+| Sections 4, 5, 7: "never reported itself ready" | `sleep`. The stand-in ends in `while true; do sleep 3600; done`, which without `sleep` is a hot spin printing "not found" to the serial console as fast as it can, so the journal the matrix greps was being flooded |
+
+The applets are symlinked at image build time now, and `test-init.sh`'s
+runtime `--install` is gone: one mechanism, and it covers both init paths.
+
+Three further things, each its own bug:
+
+- **`marker` could be polluted from either side.** The hardening for the
+  carriage return was not enough: a kernel message can land in front of a
+  marker as well as behind it. boot-check's own evidence showed it
+  (`booted 6.18.63 aarch64[   13.102431] Freeing unused kernel memory`). Any
+  exact comparison against a marker was one interleaved printk from failing,
+  which includes G4's A2 check. `marker` now drops a kernel message on either
+  side, by its `[   13.102431]` timestamp.
+- **Section 5 waited for the wrong marker.** It waited for `amp ready`, which
+  the stand-in prints *after* running the memory workload, so it started
+  watching `memory.current` once the gigabyte had already been freed. It waits
+  for `amp memory allocating` now.
+- **Section 7 asserted something the model forbids.** It killed a spawn of
+  `m7a` "once its tap exists but before its VM is running", but that window is
+  a few microseconds wide, so what it actually caught every time was a
+  *healthy* orb. A healthy orb is left alone, and with one slot that means a
+  spawn of `m7b` must fail with the capacity error, which the section then
+  recorded as a failure. It had also never freed the slot before expecting
+  `m7b` to take it, so the second half could not pass either. Rewritten to
+  test what its title promises: the VMM is killed under a running orb, the
+  next spawn brings it back on the same disk inode, a second orb is refused
+  while the first holds the only slot, and it starts once the slot is freed.
+  Killing jobs at arbitrary points is section 2's job, and section 2 passes.
+- **The kill no longer matched.** Section 7 found its VMM with
+  `pkill -f "api-socket $socket"`, and the systemd-run invocation now spells
+  that `--api-socket=<path>` as one argument, so the pattern matched nothing.
+  It matches the socket path alone now, which does not depend on the spelling.
+
+Sections 4 and 5 cannot pass until the module is on the host: section 4 needs
+the `inet jorb` nftables table and the NAT that comes with it, and section 5
+needs the zram device `zramSwap.enable` provides. Both now check for that and
+say so rather than reporting it as jorb's failure.
+
+Nothing in this round was a bug in jorb itself. Sections 1, 2, 3 and 6 passed
+throughout, which covers every operation from every start state twice, fifty
+killed jobs converging, the identical-spawn no-op, and a VMM that never opens
+its socket.
+
+## Why T5 failed twice with the same log line
+
+The second T5 run reported the same event as the first, down to the
+microsecond and the pid: `{"timestamp":"2026-11-18T10:11:42.596677Z",...,"pid":105}`,
+with "bootstrap reached after 0s". A guest does not boot in zero seconds. It
+was reading the *previous* run's journal, so the applet fix above had never
+been looked at.
+
+`lib.sh` built its journal window as `date -u '+%Y-%m-%d %H:%M:%S'` and passed
+it to `journalctl --since`. `date -u` prints UTC; `journalctl --since` reads a
+bare timestamp as **local** time. This host is Europe/Berlin, UTC+1, so the
+window opened an hour before the run started and swallowed everything the
+previous run had logged. The gate then matched a stale marker on its first
+poll.
+
+A time window was the wrong tool anyway. Both `lib.sh` and the matrix now read
+`journalctl _SYSTEMD_INVOCATION_ID=<id>`, taken from
+`systemctl show -p InvocationID`, which means exactly "this start of this
+unit" and involves no clocks, timezones or formats.
+
+The matrix had the same exposure for a different reason: `guest_log` filtered
+by unit alone, and orb names repeat between runs (`m4`, `m5`, `m7a`), so a
+section could match its own marker from an earlier run before the orb it was
+waiting on had booted. That is very likely part of why sections 4 and 5 read
+as "never reported itself ready".
+
+**T5's substance is verified**, unprivileged, by booting the image with
+`init=/jorb-init` and a token on the config disk, outside systemd:
+
+| Step | Marker |
+|---|---|
+| 6, setpriv dropped to the image's user | `amp user 1000:1000`, previously `:` |
+| 4, the config disk's keys reached the child | `amp token present` |
+| 3, /proc/net/pnp copied | `amp resolv #MANUAL nameserver 1.1.1.1 nameserver 9.9.9.9` |
+| 2, the writeback window | `amp dirty 100/100` |
+| 1, the mounts | `amp mounts / /dev /proc /sys /dev/pts /dev/shm /run` |
+
+The `ip=` cmdline fills `/proc/net/pnp` with its resolvers even when there is
+no interface to configure, which is why step 3 can be checked without a tap.
+What the root run still adds is that those lines reach the unit's journal,
+which G4 has already shown separately.
+
+Section 7 passes as rewritten.
+
+## Where this is going, decided 2026-11-18
+
+Read the self-hosted orbs documentation again before deciding any of this. Two
+things in it change the picture:
+
+1. **Amp supplies a Helm chart for GKE, EKS and AKS**, which "runs the orb
+   provider and a dispatch program that creates orbs as pods and saves paused
+   orbs to your storage bucket, so you do not write a dispatch program
+   yourself." So jorb is not the way to get self-hosted orbs on a cloud. If
+   that is the goal, the chart is less work and is maintained by Amp.
+2. **The capability matrix.** Amp-hosted orbs have memory, disk and project
+   snapshots; the Helm chart has disk and snapshots but not memory. jorb has
+   disk only: pause is a power cut, so no memory, and `ORB_SNAPSHOT_ID` is
+   ignored, so no snapshots. On Amp's own matrix the chart is currently ahead
+   of jorb.
+
+What jorb has that the chart does not, and therefore what it is for:
+
+- **Pause and resume are local.** The chart round-trips an orb's files to a
+  storage bucket; jorb leaves a reflink clone in place and boots it again.
+  For a workspace with a build tree that is seconds against minutes, and no
+  egress.
+- **It runs on hardware you own.** The chart needs a managed cluster.
+- VM-level isolation rather than a shared kernel. Worth saying plainly: the
+  documentation makes no claim about isolation or security boundaries, so this
+  is our inference and not Amp's.
+
+Decisions following from that:
+
+- **Scale-out is scoped to owned hardware**, yours or a coworker's. AWS is out:
+  KVM there means bare metal instances, and paying for `c7g.metal` to avoid a
+  free Helm chart is backwards. A dedicated box is the cheap capacity answer.
+- **Multi-host needs placement, not packaging.** An orb's disk is on one host
+  and Amp calls one provider command, so something has to route a job to the
+  host holding that orb. The simple version is `hosts[hash(orb_id) % n]`:
+  stateless, deterministic, no record to keep, and it breaks only when the
+  host set changes. Not built yet.
+- **Host setup belongs in the binary, not in Nix**, so that NixOS and a
+  coworker's Debian run the same code. `jorb preflight` exists as of today;
+  `jorb init` is next.
+- **The base image should be built in CI, not on each host.** It does not need
+  to be fresh: A7's correction records that `/usr/local/bin/amp` is a symlink
+  to a binary Amp replaces on startup, so a stale base image costs a larger
+  self-update on an orb's first boot and nothing else. The Amp image is 1531
+  MiB compressed over 34 layers, so about 4 GiB unpacked. Ship the rootfs as a
+  zstd tarball per architecture and let `jorb init` do `tar -x` plus
+  `mkfs.ext4 -d`: that needs only root, tar and e2fsprogs, where the current
+  path needs skopeo, umoci and jq, and umoci is not packaged on Debian. It
+  also takes the network out of the install path, which matters because
+  `jorb-prepare-image` is an `ExecStartPre` of the provider today, so a host
+  with no network wedges it at boot.
+
+## `jorb preflight`
+
+Every question the gates used to answer by hand, as a command, so a host that
+is not the machine jorb was written on can be checked: `/dev/kvm` opens for
+reading and writing, cgroup v2, systemd answers, the VMM runs, the guest
+kernel is there and not empty, the state and run directories exist, the state
+directory can actually clone, the base image is there, there is memory for
+every slot at once, and how many slots are free. One line each, non-zero exit
+if any failed.
+
+`tests/host/g3-reflink.sh` is deleted: the clone probe replaces it and is
+better, because it tells a filesystem that cannot clone from a directory the
+caller may not write to. G3 reported `findmnt` output and an 8 MiB `cp`; this
+reports the filesystem's name either way, and it refuses to blame XFS for a
+permission error. The first run of it found exactly that: unprivileged against
+the real `/var/lib/jorb`, the honest answer is "could not be written to", not
+"needs XFS".
+
+## `jorb init`
+
+The other half of preflight: preflight asks, init changes the host and then
+asks, so what it leaves behind is described by the same checks. Every step is
+idempotent.
+
+```
+jorb init [--create-state-image] [--state-image <path>] [--state-image-gib <n>]
+```
+
+It refuses to run as anyone but root, creates the state, disks and run
+directories at mode 0700, gives the state directory a filesystem that can
+clone if it has not got one, builds the base image if it is missing, and ends
+by running preflight.
+
+**Creating the filesystem is opt-in.** Mounting something is a persistent
+change to a machine, and jorb is meant to land on coworkers' hosts, so without
+`--create-state-image` it prints what it would have done and carries on:
+
+```
+--   /tmp/x/state cannot clone, so every spawn would copy 64 GiB.
+     Pass --create-state-image to put a 128 GiB XFS image at /var/lib/jorb.img
+     and mount it there, or mount a filesystem that can clone on /tmp/x/state
+     yourself.
+```
+
+The image is sparse: a 2 GiB one measured 2.0G apparent and 65M on disk. The
+mount it makes lasts until the host reboots, and it says so, with the fstab
+line, because the Nix module is what should own the mount on NixOS.
+
+Two things fell out of writing it:
+
+- **Commands print, jobs log.** A job explains itself to the dashboards, so it
+  logs at DEBUG; a command explains itself to whoever ran it, so it reports on
+  stdout and logs only what went wrong. The level is chosen from the mode. The
+  first version logged `--help` as an ERROR event with the whole help text in
+  one JSON field, which is as bad as it sounds.
+- **`preflight` and the VMM check now go through `host::run`**, so there is one
+  way jorb runs a program rather than two. That made preflight async, which it
+  may as well be.
+
+## The module makes the host ready itself
+
+`jorb init` is a unit now, so importing the module is the whole installation.
+
+- **`jorb-setup.service`**, a oneshot before the provider, runs
+  `jorb init --create-state-image …`. The provider `Requires` it, so a host
+  that is not ready has no provider taking jobs it cannot finish. The flake's
+  module check greps the generated units for both facts.
+- **`stateImage` and `stateImageGiB`** are options. Setting `stateImage` makes
+  init create and mount XFS on the state directory, which is what lets the
+  module work on a host whose filesystem cannot clone. Leave it null where the
+  state directory is already XFS or btrfs.
+- **The base image stopped being a hidden `ExecStartPre`** of the provider. It
+  is part of setup, so a slow pull looks like what it is instead of a provider
+  that will not start, and a host with no network fails on the unit that needed
+  the network.
+- **tmpfiles no longer creates the directories.** `jorb init` owns them, so
+  there is one owner and the same code runs on a host without Nix.
+- **`JORB_*` is defined once**, as `hostEnvironment`, and used by both things
+  that run jorb as root: the sudo rule's `jorb-root` and the setup unit. They
+  cannot disagree about which host this is.
+- **`jorb-root` still takes no arguments and passes none on.** jorb's commands
+  create filesystems and pull images; the provider is closed-source and
+  unprivileged, so the sudo rule reaches one job and nothing else. The
+  sudoers line is unchanged.
+
+Two assertions, because both failures are quiet ones: a `stateImage` inside
+`stateDirectory` would be hidden by the mount over it, and more than 256 slots
+cannot be addressed. Writing the first one caught a bug in itself:
+`lib.hasPrefix "/var/lib/jorb" "/var/lib/jorb.img"` is true as a string, so
+the obvious form would have rejected the obvious configuration. It compares
+against `"${stateDirectory}/"`, and the module check now evaluates a host with
+`stateImage = "/var/lib/jorb.img"` so that stays true.
 
 ## Open questions
 
@@ -202,19 +586,9 @@ definition, by hand with curl, independently of jorb's own code. The busybox
 ext4 image G4 and G5 boot is `nix build .#test-image`, and its init
 (`nix/test-init.sh`) prints one `JORB-GATE` marker per thing a gate observes.
 
-Run on this host (aarch64, 16K pages, /dev/kvm present, no root in this
-session):
-
-| Gate | Result |
-|---|---|
-| G1 | PASS. 15673 MiB total, 12309 MiB available, so `memoryHigh = 11797M` |
-| G2 | PASS. `hpage_pmd_size` is 33554432 (32 MiB), so A6 holds |
-| G3 | `/var/lib/jorb` is XFS as of 2026-11-18; the gate still needs root to write into it |
-| G4 | awaiting a run as root (taps, systemd-run, cgroups) |
-| G5 | awaiting a run as root |
-| G6 | see below |
-| G7 | awaiting a run as root, and it needs T10's Alloy config installed first |
-| G8 | PASS. A12 holds: `nixpkgs#amp-cli` really has `orb provider` |
+Results live in Gate results above, which is the only copy: this section had a
+second table of its own and the two disagreed as soon as the gates were
+actually run.
 
 Notes:
 
@@ -423,6 +797,19 @@ What came out, and why each was not pulling its weight:
   quickly.
 - **`tokio` in `jorb-vmm`** is a dev-dependency. Nothing in the library used
   it; the generated client uses `reqwest` and `serde_json` only.
+
+Files renamed, because the names had stopped describing the contents:
+
+- `job.rs` is `request.rs`. Renaming the type to `Request` and leaving the
+  module called `job` was half a job.
+- `limits.rs` is `fixed.rs` in `jorb` and `jorb-init`. It had drifted into
+  holding everything constant, and `SYSTEMCTL`, `GUEST_HOME` and `STATE_DIR`
+  bound nothing. The name now covers what is actually in there: the bounds
+  plus the names, paths, devices and addresses the interface pins down.
+  AGENTS.md's Bounds rule was reworded to match.
+- `jorb-vmm/src/limits.rs` is gone. It held two constants, which are at the
+  top of `lib.rs` now, because a module for two is more structure than it
+  saves.
 
 Smaller things, from a second round aimed at code size rather than structure:
 

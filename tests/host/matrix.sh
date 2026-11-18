@@ -18,6 +18,12 @@ here=$(dirname "$0")
 need_root
 need_kvm
 
+# setup() removes its whole tree, so being pointed at the production state
+# directory would delete the real base image.
+if [ "${JORB_MATRIX_DIR:-}" = /var/lib/jorb ]; then
+	fail "JORB_MATRIX_DIR is the production state directory, which the matrix would wipe"
+fi
+
 # Smaller than a real orb so a section does not wait on memory it will not
 # use. One slot, because the recovery section is about slot contention.
 slots=${JORB_SLOTS:-1}
@@ -26,7 +32,12 @@ JORB_SLOTS=$slots
 export JORB_VCPUS=${JORB_VCPUS:-2}
 export JORB_MEMORY_MIB=${JORB_MEMORY_MIB:-2048}
 
-work=${JORB_MATRIX_DIR:-/var/tmp/jorb-matrix}
+# Under the XFS mount, not in /var/tmp: every disk jorb makes is a reflink
+# clone of the base image, and /var/tmp is ext4 on this host, where
+# ioctl_ficlone fails with EOPNOTSUPP. The only symptom of that is "spawn
+# exited non-zero", so setup probes for it below rather than leaving every
+# section to discover it.
+work=${JORB_MATRIX_DIR:-/var/lib/jorb/matrix}
 export JORB_STATE_DIR=$work/state
 export JORB_RUN_DIR=/run/jorb-matrix
 export JORB_KERNEL
@@ -69,6 +80,16 @@ setup() {
 	# and needs no Amp.
 	install -m 0600 "$image" "$JORB_STATE_DIR/base.raw"
 	write_probe_targets "$JORB_STATE_DIR/base.raw"
+
+	# Without reflinks no spawn can work, and the failure arrives as a bare
+	# non-zero exit from the first job. Ask here, where the answer can say so.
+	if ! cp --reflink=always "$JORB_STATE_DIR/base.raw" \
+		"$JORB_STATE_DIR/disks/.reflink-probe" 2>"$work/reflink-error"; then
+		evidence "cp said: $(cat "$work/reflink-error")"
+		evidence "$(findmnt -T "$JORB_STATE_DIR" --noheadings --output TARGET,FSTYPE,SOURCE)"
+		fail "$JORB_STATE_DIR cannot reflink, so every ensure_disk would fail; point JORB_MATRIX_DIR at the XFS mount"
+	fi
+	rm -f "$JORB_STATE_DIR/disks/.reflink-probe"
 }
 
 # The addresses section 4 cannot work out from inside the guest, written into
@@ -211,22 +232,43 @@ wait_until_running() {
 
 # Waits for the guest to say it is ready, which means jorb-init got all the
 # way to bootstrap.
-wait_until_ready() {
-	local orb=$1 waited=0
+# Waits for one of the stand-in's markers in an orb's journal.
+wait_for_guest_marker() {
+	local orb=$1 wanted=$2 waited=0
 	while [ "$waited" -lt "$boot_deadline" ]; do
-		if journalctl -u "$(unit_of "$orb")" --no-pager --output cat 2>/dev/null |
-			grep -q 'JORB-GATE amp ready'; then
+		if guest_log "$orb" | grep -q "JORB-GATE $wanted"; then
 			return 0
 		fi
 		sleep 1
 		waited=$((waited + 1))
 	done
-	note "$orb never reported itself ready"
+	note "$orb never logged '$wanted'"
 	return 1
 }
 
+wait_until_ready() {
+	wait_for_guest_marker "$1" 'amp ready'
+}
+
+# Whether the host carries the jorb module's own configuration. Sections 4 and
+# 5 test what that configuration does, so without it there is no policy to
+# hold and nowhere for MemoryHigh to reclaim to, and saying so is better than
+# reporting it as jorb's failure.
+module_installed() {
+	nft list table inet jorb >/dev/null 2>&1
+}
+
+# This run's journal for an orb, not a previous one's.
+#
+# Orb names repeat between runs and journald keeps everything, so filtering by
+# unit alone reads back whatever an earlier run left: a section would find its
+# own marker before the orb it is waiting for had even booted. An empty answer
+# means the unit is not running, which is better than a stale one.
 guest_log() {
-	journalctl -u "$(unit_of "$1")" --no-pager --output cat 2>/dev/null
+	local invocation
+	invocation=$(systemctl show -p InvocationID --value "$(unit_of "$1")" 2>/dev/null || true)
+	[ -n "$invocation" ] || return 0
+	journalctl "_SYSTEMD_INVOCATION_ID=$invocation" --no-pager --output cat 2>/dev/null || true
 }
 
 # Back to nothing: no units, no taps, no sockets, no orb disks. The base
@@ -430,6 +472,12 @@ section_4() {
 	wipe_everything
 	mkdir -p "$JORB_STATE_DIR/disks" "$JORB_RUN_DIR"
 
+	if ! module_installed; then
+		note "no 'inet jorb' nftables table on this host, so there is no policy to test and no NAT to reach Amp through; this section needs the module (T9)"
+		finish_section 4 "an orb reaches the internet and nothing else"
+		return
+	fi
+
 	local orb=m4
 	job spawn "$orb" "$token" || note "the spawn failed"
 	wait_until_ready "$orb" || true
@@ -460,9 +508,18 @@ section_5() {
 	wipe_everything
 	mkdir -p "$JORB_STATE_DIR/disks" "$JORB_RUN_DIR"
 
+	if [ ! -r /sys/block/zram0/mm_stat ]; then
+		note "no zram0 on this host, so MemoryHigh has nowhere to reclaim to; this section needs the module (T9), which enables zramSwap"
+		finish_section 5 "memory the orb frees comes back, and zram absorbs the rest"
+		return
+	fi
+
 	local orb=m5
 	job spawn "$orb" "workload-memory-$token" || note "the spawn failed"
-	wait_until_ready "$orb" || true
+	# Not 'amp ready': the stand-in runs the workload and only then reports
+	# itself ready, so waiting for that would start watching after the
+	# gigabyte had already been freed.
+	wait_for_guest_marker "$orb" 'amp memory allocating' || true
 
 	local cgroup
 	cgroup=$(systemctl show -p ControlGroup --value "$(unit_of "$orb")")
@@ -492,11 +549,7 @@ section_5() {
 		note "the cgroup did not fall after the orb freed a gigabyte"
 	fi
 
-	if [ -r /sys/block/zram0/mm_stat ]; then
-		evidence "zram: $(awk '{print "original " $1 " bytes, compressed " $2 " bytes"}' /sys/block/zram0/mm_stat)"
-	else
-		note "no zram0 on this host, so MemoryHigh has nowhere to reclaim to"
-	fi
+	evidence "zram: $(awk '{print "original " $1 " bytes, compressed " $2 " bytes"}' /sys/block/zram0/mm_stat)"
 
 	evidence "slice MemoryHigh: $(cat /sys/fs/cgroup/jorb.slice/memory.high 2>/dev/null || echo unset)"
 
@@ -567,60 +620,51 @@ section_7() {
 
 	local first=m7a second=m7b
 
-	# Kill a spawn of the first orb once its tap exists but before its VM is
-	# running, which is the window that holds a slot without using it.
-	ORB_OPERATION=spawn ORB_ID=$first ORB_TOKEN=$token \
-		"$jorb" >/dev/null 2>>"$work/jorb.log" &
-	local spawning=$!
+	# A healthy orb in the only slot there is.
+	job spawn "$first" "$token" || note "the first spawn failed"
+	wait_until_running "$first" || true
+	expect_state "$first" "$(wanted_for spawn)" || note "$first did not come up"
 
-	local waited=0
-	while [ "$waited" -lt 30 ]; do
-		if [ -e /sys/class/net/jorb0 ]; then
-			break
-		fi
-		sleep 0.2
-		waited=$((waited + 1))
-	done
-
-	kill -9 "$spawning" 2>/dev/null || true
-	wait "$spawning" 2>/dev/null || true
-	evidence "killed a spawn of $first with its tap up: $(observed "$first")"
-
-	# With one slot, the second orb can only start if recover frees it.
-	if ! job spawn "$second" "$token"; then
-		note "a spawn of $second failed while $first held the slot"
-	fi
-	wait_until_running "$second" || true
-	expect_state "$second" "$(wanted_for spawn)" || note "$second did not come up"
-	evidence "$second took the slot: $(observed "$second")"
-
-	# Now cut the power: kill the VMM rather than stopping the unit.
-	local disk=$JORB_STATE_DIR/disks/$second.raw
-	local inode_before
+	# The power cut: kill the VMM rather than stopping its unit, then spawn
+	# again and check the orb comes back on the disk it already had. The
+	# socket path is matched on its own, so this does not depend on how jorb
+	# spells the argument.
+	local disk=$JORB_STATE_DIR/disks/$first.raw
+	local inode_before inode_after
 	inode_before=$(stat -c %i "$disk")
 
-	pkill -9 -f "api-socket $JORB_RUN_DIR/$second.sock" || true
+	pkill -9 -f "$JORB_RUN_DIR/$first.sock" || true
 	sleep 2
-	evidence "after killing the VMM: $(observed "$second")"
+	evidence "after killing the VMM: $(observed "$first")"
 
-	if ! job spawn "$second" "$token"; then
-		note "the spawn after the VMM was killed failed"
-	fi
-	wait_until_running "$second" || true
-	expect_state "$second" "$(wanted_for spawn)" || note "$second did not come back"
+	job spawn "$first" "$token" || note "the spawn after the VMM was killed failed"
+	wait_until_running "$first" || true
+	expect_state "$first" "$(wanted_for spawn)" || note "$first did not come back"
 
-	local inode_after
 	inode_after=$(stat -c %i "$disk")
 	evidence "disk inode $inode_before -> $inode_after"
 	if [ "$inode_before" != "$inode_after" ]; then
 		note "the orb came back on a different disk"
 	fi
 
-	job delete "$second" || note "the cleanup delete failed"
-	job delete "$first" || note "the cleanup delete of $first failed"
-	expect_no_debris || note "something was left behind"
+	# A healthy orb is left alone, so with one slot the second orb cannot
+	# start. No free slot is the capacity error and there is no other.
+	if job spawn "$second" "$token"; then
+		note "a spawn of $second succeeded while $first held the only slot"
+	else
+		evidence "$second was refused while $first held the slot: $(observed "$second")"
+	fi
 
+	# Freeing the slot is what lets it start, which is the other half of the
+	# same rule.
+	job delete "$first" || note "the delete of $first failed"
+	job spawn "$second" "$token" || note "the spawn of $second after the slot was freed failed"
+	wait_until_running "$second" || true
+	expect_state "$second" "$(wanted_for spawn)" || note "$second did not take the freed slot"
+
+	job delete "$second" || note "the cleanup delete failed"
 	wipe_everything
+	expect_no_debris || note "something was left behind"
 	finish_section 7 "one slot, two orbs, and a VMM killed under it"
 }
 

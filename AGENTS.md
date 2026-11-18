@@ -18,6 +18,7 @@ When two conflict, the earlier wins. v1 is deliberately minimal. A feature that 
 Source of truth: https://ampcode.com/docs/orbs/self-hosted. Re-read it when in doubt rather than relying on memory.
 
 - Input is environment variables only: `ORB_OPERATION` (`spawn` | `pause` | `delete`), `ORB_ID`, and on spawn `ORB_TOKEN` and optionally `AMP_URL`.
+- Amp always calls jorb with no arguments, so the first argument is free for the commands a person runs when installing it: `jorb preflight` reports whether this host can run orbs, and `jorb init` makes it ready. A command is chosen before clap, because clap cannot relax requirements that come from a flattened group. A job logs for the dashboards; a command reports to whoever ran it and logs only failures.
 - v1 ignores `ORB_IMAGE`, `ORB_SNAPSHOT_ID` and `ORB_TYPE`. Log that once at debug level.
 - Every operation must be safe to repeat and must finish within five minutes.
 - Exit 0 if and only if the operation's postcondition was observed.
@@ -83,7 +84,7 @@ Units are `jorb-orb-<id>.service` inside `jorb.slice`, started with `systemd-run
 
 - Kernel `$JORB_KERNEL`, no initramfs.
 - Cmdline: `console=ttyAMA0 root=/dev/vda rw init=/jorb-init ip=10.77.S.2::10.77.S.1:255.255.255.252:<orb-id>:eth0:off:1.1.1.1:9.9.9.9`
-- Disks: root (read-write), config disk (read-only), in that order.
+- Disks: root (read-write), config disk (read-only), in that order. Both are raw files and both declare `image_type: Raw`; Cloud Hypervisor refuses to boot a disk whose image type it was not told.
 - Net: the slot's tap with its host address and mask.
 - `$JORB_VCPUS` vCPUs, `$JORB_MEMORY_MIB` memory, transparent huge pages off.
 - Balloon of size 0 with free page reporting on.
@@ -156,7 +157,7 @@ The code is literate in structure, not in comment volume: it is arranged to be r
 
 - Every loop has a bound visible at the loop: a finite iterator, or a counter checked against a named limit. No `loop` or `while` whose exit depends only on the outside world.
 - Every wait has a deadline and every external call a timeout: subprocesses, API requests, socket and interface polling. The job as a whole has a deadline below Amp's five minutes.
-- Limits are named constants in `limits.rs` at each crate's root, each with a doc line saying what it bounds and why that value. Every number in "Fixed interfaces" becomes one, for example `MAX_ORB_ID_LEN`, `CONFIG_DISK_BYTES`, `MAX_SLOTS`, `API_SOCKET_WAIT`, `UNIT_STOP_TIMEOUT`, `JOB_DEADLINE`. No bare literals for sizes, counts, retries or durations elsewhere.
+- Values the design fixes are named constants, each with a doc line saying what it fixes and why that value: the bounds that keep loops and waits finite, and the names, paths, devices and addresses the interface pins down. Every number in "Fixed interfaces" becomes one, for example `MAX_ORB_ID_LEN`, `CONFIG_DISK_BYTES`, `MAX_SLOTS`, `API_SOCKET_WAIT`, `UNIT_STOP_TIMEOUT`, `JOB_DEADLINE`. A crate with more than a handful keeps them in `fixed.rs` at its root; `jorb-vmm` has two and keeps them at the top of `lib.rs`, because a module for two constants is more structure than it saves. No bare literals for sizes, counts, retries, durations or fixed names elsewhere.
 - One exemption: `jorb-init`'s reap loop runs for the life of the guest. It blocks in `waitpid`, lives in a function returning `!`, and is the only such loop.
 - No recursion. If an iterative version would be substantially larger or harder to read, stop and ask, with both versions sketched.
 
@@ -189,7 +190,7 @@ nix flake check                                        # all of the above plus N
 - Work one task at a time, in `PLAN.md` order, respecting dependencies. Read the task's acceptance checks before writing code.
 - After each task: run its checks, commit (`T<n>: <what>, and why`), and update `PROGRESS.md` with status, the commands you ran and their results, and any open question. Git history plus `PROGRESS.md` is the project's memory across sessions.
 - Report faithfully. A check that failed or was not run is recorded as such, with output. Never weaken a check, stub a function or special-case a test to get a pass.
-- Checks marked `[host]` need the real machine. If `uname -m` is `aarch64`, `/dev/kvm` exists and you have root, run them. Otherwise write the script, record "awaiting host run" in `PROGRESS.md`, and continue with tasks that do not depend on the result. Do not infer a gate's outcome.
+- Checks marked `[host]` need the real machine, which is not the same as needing root. Booting a VM needs only `/dev/kvm`, which is mode 0666 here; root is for creating taps, system-scope `systemd-run`, cgroup reads and writing `/var/lib/jorb`. Work out which of the two a check actually needs before recording it as blocked, and run everything that is not. Otherwise write the script, record "awaiting host run" in `PROGRESS.md`, and continue with tasks that do not depend on the result. Do not infer a gate's outcome.
 - Keep going until every remaining task is blocked on a `[host]` result or on an "ask first" item, then report what is done, what is verified, and what is waiting.
 - At the end of each milestone, have a reviewer with fresh context (a subagent, if you have one) check the diff against this file's Model, Failure model, Fixed interfaces, Security, Names and Bounds sections. Fix what it finds before moving on.
 

@@ -28,13 +28,15 @@ fi
 
 evidence "bootstrap reached after ${gate_marker_wait}s"
 
-# Step 7 logs as JSON, which is what the dashboards read.
-started=$(grep -m1 'bootstrap started' "$gate_journal" || true)
+# Step 7 logs as JSON. The console it shares with the kernel does not, so the
+# event is extracted from the line rather than assumed to be the whole of it.
+started=$(json_event 'bootstrap started')
 if [ -z "$started" ]; then
-	fail "jorb-init logged no 'bootstrap started' event"
+	evidence "the journal line was: $(grep -m1 'bootstrap started' "$gate_journal" || true)"
+	fail "jorb-init logged no 'bootstrap started' JSON event"
 fi
 if ! printf '%s' "$started" | jq -e '.fields.message == "bootstrap started"' >/dev/null 2>&1; then
-	evidence "the line was: $started"
+	evidence "the event was: $started"
 	fail "jorb-init's log line is not the JSON the dashboards expect"
 fi
 evidence "jorb-init logged: $started"

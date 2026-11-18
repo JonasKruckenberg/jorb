@@ -13,7 +13,7 @@ use std::net::Ipv4Addr;
 use std::num::{NonZeroU8, NonZeroU32};
 use std::path::{Path, PathBuf};
 
-use jorb_vmm::VmBuilder;
+use jorb_vmm::{VmBuilder, Vmm};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -29,7 +29,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
          ip=10.77.{slot}.2::10.77.{slot}.1:255.255.255.252:boot-example:eth0:off:1.1.1.1:9.9.9.9"
     );
 
-    VmBuilder::new(
+    let vmm = Vmm::at(socket)?;
+    let vm = VmBuilder::new(
         Path::new(kernel),
         &cmdline,
         NonZeroU8::new(4).ok_or("four is not zero")?,
@@ -44,10 +45,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ipv4Addr::new(255, 255, 255, 252),
     )
     .free_page_reporting()
-    .boot(socket)
+    .boot(&vmm)
     .await?;
 
-    println!("{:?}", jorb_vmm::state(socket).await?);
+    println!("{:?}", vm.state().await?);
 
     Ok(())
 }

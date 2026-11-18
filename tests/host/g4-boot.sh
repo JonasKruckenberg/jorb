@@ -31,7 +31,7 @@ evidence "console reached the journal after ${gate_marker_wait}s, so A3 holds"
 # A2: attach order. The guest booted with root=/dev/vda, so vda is the root
 # disk; the config disk has to be the one behind it.
 vdb_line=$(marker vdb-first-line)
-evidence "disks: $(grep -o '/dev/vd[abc] [a-z]*' "$gate_journal" | tr '\n' ' ')"
+evidence "disks: $(grep -oE '/dev/vd[abc] (present|absent)' "$gate_journal" | tr '\n' ' ')"
 evidence "first line of /dev/vdb: $vdb_line"
 if [ "$vdb_line" != "JORB_GATE=$id" ]; then
 	fail "/dev/vdb is not the config disk, so A2 does not hold"

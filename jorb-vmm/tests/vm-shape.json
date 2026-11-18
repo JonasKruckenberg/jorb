@@ -17,6 +17,7 @@
     {
       "backing_files": false,
       "direct": false,
+      "image_type": "Raw",
       "num_queues": 1,
       "path": "/var/lib/jorb/disks/orb.raw",
       "queue_size": 128,
@@ -27,6 +28,7 @@
     {
       "backing_files": false,
       "direct": false,
+      "image_type": "Raw",
       "num_queues": 1,
       "path": "/run/jorb/orb.cfg",
       "queue_size": 128,
