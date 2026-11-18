@@ -5,7 +5,9 @@
 //! boot and it goes away with the process, so the tap is the only record of a
 //! slot being taken.
 
+use std::io::ErrorKind;
 use std::net::Ipv4Addr;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -135,13 +137,16 @@ pub async fn boot(settings: &Settings, orb: &OrbId, slot: Slot) -> Result<()> {
         .context("creating and booting the VM")
 }
 
+/// Waits until something accepts a connection on the socket. The file
+/// appears before the VMM listens on it, so a missing file and a refused
+/// connection both mean "not yet".
 async fn wait_for_socket(socket: &Path) -> Result<()> {
     let deadline = Instant::now() + limits::API_SOCKET_WAIT;
 
-    while !socket.exists() {
+    while !accepts_connections(socket)? {
         ensure!(
             Instant::now() < deadline,
-            "{} did not appear within {:?}",
+            "nothing listened on {} within {:?}",
             socket.display(),
             limits::API_SOCKET_WAIT
         );
@@ -151,9 +156,44 @@ async fn wait_for_socket(socket: &Path) -> Result<()> {
     Ok(())
 }
 
+fn accepts_connections(socket: &Path) -> Result<bool> {
+    match UnixStream::connect(socket) {
+        Ok(_) => Ok(true),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::NotFound | ErrorKind::ConnectionRefused
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error).with_context(|| format!("connecting to {}", socket.display())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_socket_counts_as_ready_only_once_something_listens() {
+        let directory = std::env::temp_dir().join("jorb-tests").join("socket");
+        std::fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("vmm.sock");
+        let _ = std::fs::remove_file(&socket);
+
+        assert!(!accepts_connections(&socket).unwrap(), "no file");
+
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        assert!(accepts_connections(&socket).unwrap(), "a listener");
+
+        drop(listener);
+        assert!(socket.exists());
+        assert!(
+            !accepts_connections(&socket).unwrap(),
+            "a file nobody listens on"
+        );
+    }
 
     #[test]
     fn a_slots_tap_and_addresses_follow_its_index() {

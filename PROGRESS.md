@@ -1341,3 +1341,24 @@ comment said the hostname must resolve.
   as untested if the applet is missing) and `hostname` (a ping by name), and
   `jorb-init-in-guest.sh` fails unless all four say `works`. `[host]`
   awaiting a run.
+
+### B5. Smaller behaviour items
+
+Confirmed all three.
+
+- **Subprocess environment.** `run` spawned `systemctl` and `systemd-run`
+  with jorb's whole environment, `ORB_TOKEN` included, and a child that
+  outlived the timeout kept running. Now `.env_remove("ORB_TOKEN")` and
+  `.kill_on_drop(true)`; the timeout drops the future, which kills the child.
+- **Config disks lingered.** `stop` left `/run/jorb/<id>.cfg`, token
+  included, until a delete or a reboot. `stop` now removes it, and
+  `remove_disk` no longer does, since `stop` always runs first. The spawn
+  no-op reads the config disk only for an orb `recover` confirmed running,
+  which has not been stopped. A VM that dies on its own and whose unit is
+  collected still leaves its config disk until that orb's next job; `recover`
+  only sees units that exist.
+- **Socket readiness.** `wait_for_socket` waited for the file. It now
+  connects, and treats a missing file or a refused connection as "not yet";
+  any other error fails. A unit test covers no file, a listener, and a file
+  left after the listener closed.
+- The container check: clean, 31 tests.

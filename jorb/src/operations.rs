@@ -101,11 +101,13 @@ pub async fn delete(settings: &Settings, orb: &OrbId) -> Result<()> {
     remove_disk(settings, orb)
 }
 
-/// Stops the orb's unit and takes its socket away.
+/// Stops the orb's unit and takes its socket and config disk away. The config
+/// disk holds the token and is only needed while the VM runs.
 #[instrument(skip_all, fields(orb = %orb))]
 async fn stop(settings: &Settings, orb: &OrbId) -> Result<()> {
     unit::stop(orb).await?;
-    disk::remove_if_present(&vm::api_socket_path(settings, orb))
+    disk::remove_if_present(&vm::api_socket_path(settings, orb))?;
+    disk::remove_if_present(&disk::config_disk_path(settings, orb))
 }
 
 /// Gives the orb a disk if it has none, by cloning the base image.
@@ -164,13 +166,13 @@ fn ensure_disk(settings: &Settings, orb: &OrbId) -> Result<()> {
     Ok(())
 }
 
-/// Takes the orb's disk and its config disk away.
+/// Takes the orb's disk away. `stop`, which always runs first, has already
+/// taken its config disk.
 #[instrument(skip_all, fields(orb = %orb))]
 fn remove_disk(settings: &Settings, orb: &OrbId) -> Result<()> {
     let disk = disk::disk_path(settings, orb);
 
     disk::remove_if_present(&disk)?;
-    disk::remove_if_present(&disk::config_disk_path(settings, orb))?;
 
     ensure!(
         !disk.try_exists()?,
