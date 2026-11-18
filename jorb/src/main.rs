@@ -24,8 +24,9 @@ use tracing::{Level, debug, error, info, info_span};
 use crate::job::{Job, Operation};
 use crate::settings::Settings;
 
-/// The process environment in a job, a table in a test.
-pub type Environment<'a> = &'a dyn Fn(&str) -> Option<String>;
+/// The process environment in a job, a table in a test. A variable that is
+/// set but not UTF-8 is an error, not absent.
+pub type Environment<'a> = &'a dyn Fn(&str) -> Result<Option<String>>;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
@@ -35,7 +36,10 @@ async fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
 
-    let environment = |name: &str| std::env::var(name).ok();
+    let environment = |name: &str| match std::env::var(name) {
+        Err(std::env::VarError::NotUnicode(_)) => bail!("{name} is not UTF-8"),
+        value => Ok(value.ok()),
+    };
     let parsed = if std::env::args_os().len() > 1 {
         Err(anyhow::anyhow!(
             "jorb takes no arguments: the job is in the environment"
@@ -119,7 +123,7 @@ async fn lock(settings: &Settings) -> Result<File> {
 }
 
 pub fn required(environment: Environment, name: &str) -> Result<String> {
-    environment(name).with_context(|| format!("{name} is not set"))
+    environment(name)?.with_context(|| format!("{name} is not set"))
 }
 
 /// Runs a program with separate arguments and returns its stdout. No shell,
@@ -154,15 +158,17 @@ pub async fn run(program: &str, arguments: &[&str]) -> Result<String> {
 }
 
 #[cfg(test)]
-pub fn test_environment(variables: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
+pub fn test_environment(
+    variables: &[(&str, &str)],
+) -> impl Fn(&str) -> Result<Option<String>> + use<> {
     let variables: Vec<(String, String)> = variables
         .iter()
         .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
         .collect();
     move |wanted| {
-        variables
+        Ok(variables
             .iter()
             .find(|(name, _)| name == wanted)
-            .map(|(_, value)| value.clone())
+            .map(|(_, value)| value.clone()))
     }
 }

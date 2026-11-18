@@ -109,7 +109,7 @@ wipe() {
 	local unit tap
 	for unit in $(orb_units); do systemctl stop "$unit" >/dev/null 2>&1 || true; done
 	for tap in /sys/class/net/jorb[0-9]*; do
-		[ -e "$tap" ] && ip link del "$(basename "$tap")" 2>/dev/null
+		ip link del "$(basename "$tap")" 2>/dev/null || true
 	done
 	rm -rf "$JORB_RUN_DIR" "$JORB_STATE_DIR"/disks/*.raw "$JORB_STATE_DIR/disks/.tmp"
 	mkdir -p "$JORB_RUN_DIR" "$JORB_STATE_DIR/disks"
@@ -169,8 +169,9 @@ section_1() {
 section_2() {
 	local orb=m2 round delay operation
 	for round in $(seq 1 50); do
-		# Up to 1.5 s, so a kill lands anywhere from the lock to mid-boot.
-		delay=$(awk -v seed="$round" 'BEGIN { srand(seed); printf "%.2f", rand() * 1.5 }')
+		# Up to 1.5 s, so a kill lands anywhere from the lock to mid-boot. Never
+		# 0, which timeout reads as no timeout at all.
+		delay=$(awk -v seed="$round" 'BEGIN { srand(seed); printf "%.2f", 0.01 + rand() * 1.5 }')
 		ORB_OPERATION=$(shuf -e spawn pause delete -n 1) ORB_ID=$orb ORB_TOKEN=$token \
 			timeout -s KILL "$delay" "$jorb" 2>/dev/null || true
 	done
@@ -233,11 +234,12 @@ section_5() {
 	settled=$(cat "$cgroup/memory.current")
 	evidence "peak $((peak >> 20)) MiB, settled $((settled >> 20)) MiB"
 	evidence "zram original and compressed bytes: $(cut -d' ' -f1,2 /sys/block/zram0/mm_stat 2>/dev/null || echo 'no zram')"
-	[ "$settled" -lt "$peak" ] || note "the cgroup did not fall after the guest freed a gigabyte"
+	[ "$settled" -lt "$peak" ] || note "the cgroup did not fall after the guest freed 900 MiB"
 }
 
-# 6. A VMM that never answers fails the spawn within BOOT_WAIT, and the next
-# job of any orb removes it.
+# 6. A VMM that never opens its socket fails the spawn within BOOT_WAIT, and
+# the next job of any orb removes it. (Section 8 covers one that stops
+# answering.)
 section_6() {
 	local orb=m6 fake=$work/fake started status=0
 	mkdir -p "$fake"
@@ -320,9 +322,13 @@ sections=("$@")
 for number in "${sections[@]}"; do
 	printf '\n--- %s\n' "$number"
 	section_failed=
+	# A command that fails inside a section is a finding, not a reason to stop
+	# the run: the section's checks report it.
+	set +e
 	wipe
 	"section_$number"
 	wipe
+	set -e
 	if [ -n "$section_failed" ]; then
 		printf 'FAIL matrix %s\n' "$number"
 		failures=$((failures + 1))

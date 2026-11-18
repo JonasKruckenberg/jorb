@@ -259,6 +259,12 @@ in
               oifname "jorb*" ct state != { established, related } drop
             }
 
+            # Host processes too: nothing on the host opens a connection into an orb.
+            chain output {
+              type filter hook output priority filter; policy accept;
+              oifname "jorb*" ct state != { established, related } drop
+            }
+
             chain postrouting {
               type nat hook postrouting priority srcnat; policy accept;
               ip saddr 10.77.0.0/16 oifname != "jorb*" masquerade

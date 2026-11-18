@@ -30,10 +30,10 @@ impl Job {
         let orb = required(environment, "ORB_ID")?.parse()?;
         let operation = match required(environment, "ORB_OPERATION")?.as_str() {
             "spawn" => {
-                let token = environment("ORB_TOKEN")
+                let token = environment("ORB_TOKEN")?
                     .map(SecretString::from)
                     .context("spawn needs ORB_TOKEN, and this job has none")?;
-                Operation::Spawn(config_disk(&token, environment("AMP_URL").as_deref())?)
+                Operation::Spawn(config_disk(&token, environment("AMP_URL")?.as_deref())?)
             }
             "pause" => Operation::Pause,
             "delete" => Operation::Delete,

@@ -27,8 +27,10 @@ writeShellApplication {
     state=''${JORB_STATE_DIR:-/var/lib/jorb}
     work=$state/.image
 
-    [ -e "$state/base.raw" ] && exit 0
+    # The scratch tree is gigabytes; it goes on entry and once the base is in
+    # place, never on the way out.
     rm -rf "$work"
+    [ -e "$state/base.raw" ] && exit 0
     mkdir -p "$work"
 
     # The digest is the integrity check, so no signature policy.
@@ -45,5 +47,6 @@ writeShellApplication {
     sync "$work/base.raw"
     mv "$work/base.raw" "$state/base.raw"
     sync "$state"
+    rm -rf "$work"
   '';
 }

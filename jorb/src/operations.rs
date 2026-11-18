@@ -30,6 +30,10 @@ use crate::vm::{self, Slot};
 /// orbs that are. Under the lock no job is mid-start, so such a unit is debris
 /// or a VMM that has stopped answering; either way it holds a slot. The cost
 /// is that a VMM slower than the subprocess timeout is stopped while alive.
+///
+/// Then it removes every config disk and socket that belongs to no running
+/// orb: a guest that powered off takes its unit with it, not its files, and
+/// a config disk holds a token.
 #[instrument(skip_all)]
 pub async fn recover(settings: &Settings) -> Result<Vec<OrbId>> {
     let mut running = Vec::new();
@@ -53,6 +57,16 @@ pub async fn recover(settings: &Settings) -> Result<Vec<OrbId>> {
                 warn!(recovered = %orb, reason = format!("{reason:#}"), "stopping");
                 stop(settings, &orb).await?;
             }
+        }
+    }
+
+    for entry in std::fs::read_dir(&settings.run_directory)? {
+        let path = entry?.path();
+        let owner = path
+            .file_stem()
+            .and_then(|stem| stem.to_str()?.parse::<OrbId>().ok());
+        if !owner.is_some_and(|orb| running.contains(&orb)) {
+            remove_if_present(&path)?;
         }
     }
     Ok(running)
@@ -142,6 +156,8 @@ fn remove_disk(settings: &Settings, orb: &OrbId) -> Result<()> {
 async fn start(settings: &Settings, orb: &OrbId, config_disk: &ConfigDisk) -> Result<()> {
     vm::ensure_network_policy().await?;
     remove_if_present(&settings.api_socket_path(orb))?;
+    let slot = Slot::lowest_free(settings)?;
+    tracing::Span::current().record("slot", slot.index());
 
     // Mode 0600 on a tmpfs: the token never reaches a persistent disk.
     let config_path = settings.config_disk_path(orb);
@@ -155,10 +171,11 @@ async fn start(settings: &Settings, orb: &OrbId, config_disk: &ConfigDisk) -> Re
     file.write_all(config_disk.as_bytes())?;
     file.sync_all()?;
 
-    let slot = Slot::lowest_free(settings)?;
-    tracing::Span::current().record("slot", slot.index());
-    unit::start(orb, &vm::command(settings, orb, slot)).await?;
-    vm::wait_until_running(settings, orb).await?;
+    let invocation = unit::start(orb, &vm::command(settings, orb, slot)).await?;
+    info!(invocation, "started");
+    vm::wait_until_running(settings, orb)
+        .await
+        .with_context(|| format!("see journalctl _SYSTEMD_INVOCATION_ID={invocation}"))?;
     info!("running");
     Ok(())
 }

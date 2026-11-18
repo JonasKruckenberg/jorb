@@ -28,6 +28,9 @@ check dev-fd '[ -e /dev/fd/0 ]'
 if command -v script >/dev/null; then
 	check pty 'script -q -c true /dev/null'
 fi
+# Every unreachable-* check is a ping that must fail, which proves nothing if
+# ping cannot work at all here; this one must succeed.
+check ping-works 'ping -c 1 -W 2 1.1.1.1'
 check hostname 'ping -c 1 -W 2 "$(hostname)"'
 
 # The policy: the host (the other end of the slot's /30), the LAN, metadata
@@ -46,11 +49,12 @@ check internet 'wget -q -T 20 -O /dev/null https://ampcode.com/'
 
 case "$ORB_TOKEN" in
 *workload-memory*)
-	mount -t tmpfs -o size=2G tmpfs /tmp
+	# /dev/shm is jorb-init's 1 GiB tmpfs: memory, not page cache, and
+	# writable without root.
 	echo "JORB-GATE memory allocating"
-	dd if=/dev/zero of=/tmp/blob bs=1M count=1024 2>/dev/null
+	dd if=/dev/zero of=/dev/shm/blob bs=1M count=900 2>/dev/null
 	sleep 10
-	rm -f /tmp/blob
+	rm -f /dev/shm/blob
 	echo "JORB-GATE memory freed"
 	;;
 esac

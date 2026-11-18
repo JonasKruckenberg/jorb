@@ -9,6 +9,8 @@ use crate::job::OrbId;
 use crate::{limits, run};
 
 const PREFIX: &str = "jorb-orb-";
+/// The host kills an orb before anything else.
+const OOM_SCORE_ADJUST: i32 = 500;
 const SUFFIX: &str = ".service";
 
 pub fn name(orb: &OrbId) -> String {
@@ -41,15 +43,16 @@ pub async fn orb_units() -> Result<Vec<String>> {
 }
 
 /// `--collect` so a failed unit leaves nothing behind; `Type=exec` so systemd
-/// waits for the exec; a high OOM score so the host kills an orb first.
-pub async fn start(orb: &OrbId, command: &[String]) -> Result<()> {
+/// waits for the exec. Returns the invocation id, which finds the unit's
+/// journal after `--collect` has removed the unit.
+pub async fn start(orb: &OrbId, command: &[String]) -> Result<String> {
     let unit = name(orb);
     let mut arguments = vec![
         "--collect".to_owned(),
         format!("--unit={unit}"),
         "--slice=jorb.slice".to_owned(),
         "--property=Type=exec".to_owned(),
-        "--property=OOMScoreAdjust=500".to_owned(),
+        format!("--property=OOMScoreAdjust={OOM_SCORE_ADJUST}"),
         format!(
             "--property=TimeoutStopSec={}",
             limits::UNIT_STOP_TIMEOUT.as_secs()
@@ -62,7 +65,12 @@ pub async fn start(orb: &OrbId, command: &[String]) -> Result<()> {
     run("systemd-run", &arguments)
         .await
         .with_context(|| format!("starting {unit}"))?;
-    Ok(())
+    let invocation = run(
+        "systemctl",
+        &["show", "--property=InvocationID", "--value", &unit],
+    )
+    .await?;
+    Ok(invocation.trim().to_owned())
 }
 
 /// `systemctl stop` waits for the stop to finish, and its exit code is not the
