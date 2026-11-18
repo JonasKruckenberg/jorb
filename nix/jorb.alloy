@@ -1,19 +1,8 @@
-// What jorb adds to the host's Alloy: cgroup metrics for the orbs, labelled
-// by orb rather than by cgroup path.
+// jorb's own Alloy file, beside the owner's: cgroup metrics for the orbs,
+// labelled by orb. ASSUMES A11 (G7 checks it).
 //
-// Installed as its own file so the owner's existing Alloy configuration is
-// never edited. Alloy reads every *.alloy file in its configuration
-// directory, so this composes rather than replaces. The module substitutes
-// @JORB_METRICS_ENDPOINT@ before installing it.
-
-// ASSUMES A11: Alloy's cAdvisor exporter reports the /jorb.slice cgroups at
-// all, and the host's journal already reaches Loki. G7 checks both.
-//
-// Collect jorb.slice and nothing else. In cAdvisor, docker_only turns off
-// every raw cgroup except the root, the allowlist names the prefixes to
-// collect anyway, and the root is turned off separately. With no Docker on the
-// host that leaves the orbs. Container labels are off because an orb is a VM
-// and has none.
+// docker_only turns off every raw cgroup but the root, the allowlist brings
+// jorb.slice back, and the root is turned off on its own.
 prometheus.exporter.cadvisor "jorb" {
 	store_container_labels      = false
 	docker_only                 = true
@@ -31,16 +20,7 @@ prometheus.scrape "jorb" {
 prometheus.relabel "jorb" {
 	forward_to = [prometheus.remote_write.jorb.receiver]
 
-	// The exporter is already restricted; this keeps a container the host
-	// might run under Docker out of jorb's series too.
-	rule {
-		action        = "keep"
-		source_labels = ["id"]
-		regex         = "/jorb\\.slice(/.*)?"
-	}
-
-	// /jorb.slice/jorb-orb-amp-T-1a2b.service becomes orb="amp-T-1a2b", which is
-	// the label every panel groups by.
+	// /jorb.slice/jorb-orb-amp-1.service becomes orb="amp-1".
 	rule {
 		action        = "replace"
 		source_labels = ["id"]
@@ -49,8 +29,6 @@ prometheus.relabel "jorb" {
 		replacement   = "$1"
 	}
 
-	// The cgroup path itself says nothing a dashboard needs once the orb is
-	// a label, and it makes series churn on every rename.
 	rule {
 		action = "labeldrop"
 		regex  = "name"

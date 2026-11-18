@@ -1,59 +1,49 @@
-# jorb-prepare-image: turns the pinned Amp orb image into /var/lib/jorb/base.raw.
+# jorb-prepare-image: turns the pinned Amp orb image into the base image every
+# orb's disk is cloned from. Root, because ownership and setuid bits have to
+# survive into the ext4. Everything happens in a scratch directory and the
+# result is renamed into place, so a kill leaves no base or a whole one.
 #
-# Every orb's disk is a reflink clone of that file, so this runs once per host
-# (as jorb-base-image.service, before the provider) and exits immediately when
-# the base is already there. It needs root: the image's ownership and setuid bits have
-# to survive into the ext4, and mkfs.ext4 -d keeps whatever the unpack left.
-#
-# The digest below is what the gate records. Refresh it by running
-# tests/host/amp-image.sh, which prints the current one; the `latest` tags
-# move often, which is the reason jorb pins a digest rather than a tag.
+# The `latest` tag moves often, so the digest is pinned; tests/host/amp-image.sh
+# prints the current one.
 {
-  lib,
   writeShellApplication,
-  coreutils,
   e2fsprogs,
   jq,
   skopeo,
   umoci,
-  util-linux,
   jorb-init,
 }:
 
-let
-  registry = "us-central1-docker.pkg.dev/amp-prod-0/amp-orb";
-
-  image = {
-    repository = "${registry}/amp-orb-arm64";
-    digest = "sha256:e25e30674cc051a6477fe9b148da1627f4186828dbd18e3151deeaa0d8ce1e68";
-  };
-in
-
 writeShellApplication {
   name = "jorb-prepare-image";
-
   runtimeInputs = [
-    coreutils
     e2fsprogs
     jq
     skopeo
     umoci
-    util-linux
   ];
-
-  # Keep the script itself free of Nix interpolation beyond these four, so
-  # shellcheck sees the same text that runs.
   text = ''
-    image_repository=${lib.escapeShellArg image.repository}
-    image_digest=${lib.escapeShellArg image.digest}
-    jorb_init=${lib.escapeShellArg "${jorb-init}/bin/jorb-init"}
-    base_size=${lib.escapeShellArg "64G"}
+    image=docker://us-central1-docker.pkg.dev/amp-prod-0/amp-orb/amp-orb-arm64@sha256:e25e30674cc051a6477fe9b148da1627f4186828dbd18e3151deeaa0d8ce1e68
+    state=''${JORB_STATE_DIR:-/var/lib/jorb}
+    work=$state/.image
 
-    ${builtins.readFile ./prepare-image.sh}
+    [ -e "$state/base.raw" ] && exit 0
+    rm -rf "$work"
+    mkdir -p "$work"
+
+    # The digest is the integrity check, so no signature policy.
+    skopeo --insecure-policy copy --quiet "$image" "oci:$work/oci:amp"
+    umoci unpack --image "$work/oci:amp" "$work/bundle"
+    rootfs=$work/bundle/rootfs
+
+    install -m 0755 ${jorb-init}/bin/jorb-init "$rootfs/jorb-init"
+    skopeo inspect --config "oci:$work/oci:amp" | jq -r '.config.Env // [] | .[]' >"$rootfs/etc/jorb-env"
+
+    # Sparse: 64 GiB to the guest, what the image uses to the host.
+    truncate -s 64G "$work/base.raw"
+    mkfs.ext4 -q -F -L jorb -d "$rootfs" "$work/base.raw"
+    sync "$work/base.raw"
+    mv "$work/base.raw" "$state/base.raw"
+    sync "$state"
   '';
-
-  meta = {
-    description = "Builds jorb's base disk image from the pinned Amp orb image";
-    platforms = lib.platforms.linux;
-  };
 }

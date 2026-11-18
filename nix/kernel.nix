@@ -1,10 +1,6 @@
-# The guest kernel: an uncompressed arm64 Image, built from defconfig plus
-# the fragments in this directory.
-#
-# Cloud Hypervisor's source tree ships no reference guest config (its
-# ch_defconfig lives in the cloud-hypervisor/linux fork, which would be a
-# second, unpinned source), so this starts from defconfig as the plan's
-# fallback says.
+# The guest kernel: an uncompressed arm64 Image from defconfig plus
+# guest-kernel.config. Cloud Hypervisor ships no reference guest config of its
+# own outside a separate, unpinned kernel fork.
 {
   lib,
   stdenv,
@@ -22,13 +18,6 @@
   rsync,
   zstd,
 }:
-
-let
-  fragments = [
-    ./guest-kernel.config
-    ./guest-kernel-arm64.config
-  ];
-in
 
 stdenv.mkDerivation {
   pname = "jorb-guest-kernel";
@@ -48,45 +37,27 @@ stdenv.mkDerivation {
     rsync
     zstd
   ];
-
-  # The kernel sets its own compiler flags; stdenv's hardening wrappers only
-  # fight it.
+  # The kernel sets its own compiler flags.
   hardeningDisable = [ "all" ];
-
   env.ARCH = "arm64";
 
-  postPatch = ''
-    patchShebangs scripts
-  '';
+  postPatch = "patchShebangs scripts";
 
   configurePhase = ''
-    runHook preConfigure
     make defconfig
-    scripts/kconfig/merge_config.sh -m .config ${lib.concatStringsSep " " fragments}
+    scripts/kconfig/merge_config.sh -m .config ${./guest-kernel.config}
     make olddefconfig
-    bash ${./kernel-config-check.sh} .config ${lib.concatStringsSep " " fragments}
-    runHook postConfigure
+    bash ${./kernel-config-check.sh} .config ${./guest-kernel.config}
   '';
 
-  buildPhase = ''
-    runHook preBuild
-    make -j"$NIX_BUILD_CORES" Image
-    runHook postBuild
-  '';
+  buildPhase = ''make -j"$NIX_BUILD_CORES" Image'';
 
-  # `kernel` is what jorb passes as JORB_KERNEL. The config travels with it so
-  # a gate can show what booted.
   installPhase = ''
-    runHook preInstall
     mkdir -p "$out"
     cp arch/arm64/boot/Image "$out/kernel"
     cp .config "$out/config"
-    runHook postInstall
   '';
 
-  meta = {
-    description = "Guest kernel for jorb's Cloud Hypervisor microVMs";
-    platforms = [ "aarch64-linux" ];
-    license = lib.licenses.gpl2Only;
-  };
+  meta.platforms = [ "aarch64-linux" ];
+  meta.license = lib.licenses.gpl2Only;
 }
