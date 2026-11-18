@@ -176,6 +176,8 @@
         test-image = pkgs.callPackage ./nix/test-image.nix { jorb-init = jorbInitFor pkgs; };
         jorb-init = jorbInitFor pkgs;
         jorb-prepare-image = pkgs.callPackage ./nix/image.nix { jorb-init = jorbInitFor pkgs; };
+        # The VMM the client is generated for, so the module runs that one.
+        inherit (pkgs) cloud-hypervisor;
       });
 
       # The host side, with this flake's own builds as the defaults the module
@@ -192,6 +194,7 @@
             package = lib.mkDefault ours.jorb;
             prepareImagePackage = lib.mkDefault ours.jorb-prepare-image;
             kernel = lib.mkDefault "${ours.guest-kernel}/kernel";
+            cloudHypervisorPackage = lib.mkDefault ours.cloud-hypervisor;
           };
         };
 
@@ -261,6 +264,10 @@
                 zramSwap.enable = ${lib.boolToString host.config.zramSwap.enable}
               '';
             in
+            # The VMM the host runs is the one whose spec generated the client.
+            assert lib.assertMsg (
+              "${host.config.services.jorb.cloudHypervisorPackage.src}" == "${pkgs.cloud-hypervisor.src}"
+            ) "the module's Cloud Hypervisor is not the one jorb-vmm was generated from";
             pkgs.runCommand "jorb-module"
               {
                 nativeBuildInputs = [

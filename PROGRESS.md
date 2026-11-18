@@ -1057,3 +1057,19 @@ provider unit's `path` held it too. The store copy has no setuid bit.
   sudo package.
 - `[host]` `sudo -u jorb env ORB_OPERATION=pause ORB_ID=review-c2 <jorb-dispatch>`
   exits 0: awaiting a host run.
+
+### C3. The VMM could differ from the one the client was generated for
+
+Confirmed: `cloudHypervisorPackage` defaulted to the host's
+`pkgs.cloud-hypervisor`, while `CH_OPENAPI_SPEC` came from the flake's own
+nixpkgs.
+
+- The flake exports `packages.<system>.cloud-hypervisor` and its module sets
+  `cloudHypervisorPackage = mkDefault` that package, as it does for `package`
+  and `kernel`.
+- The module check asserts, at evaluation, that the module's VMM `src` is the
+  `src` the spec comes from. Its `drvPath` evaluates.
+- Evaluated on the check host: the module's VMM is
+  `/nix/store/sii8k9vh…-cloud-hypervisor-54.1`, the same path as the flake's
+  package, and its `src` is `/nix/store/475y2r9n…-source`, which is where
+  `CH_OPENAPI_SPEC` points.
