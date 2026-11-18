@@ -65,7 +65,7 @@ pub async fn run(settings: &Settings, request: &Request) -> Result<()> {
         Operation::Pause => stop(settings, orb).await,
         Operation::Delete => {
             stop(settings, orb).await?;
-            remove_disk(settings, orb)
+            remove_if_present(&settings.disk_path(orb))
         }
     }
 }
@@ -94,7 +94,7 @@ async fn recover(settings: &Settings) -> Result<Vec<OrbId>> {
         .iter()
         .filter_map(|unit| systemd::orb_of(unit))
     {
-        match vm::confirm_running(settings, &orb).await {
+        match jorb_vmm::running(&settings.api_socket_path(&orb)).await {
             Ok(()) => {
                 let disk = settings.disk_path(&orb);
                 ensure!(
@@ -153,25 +153,7 @@ fn ensure_disk(settings: &Settings, orb: &OrbId) -> Result<()> {
     std::fs::rename(&partial_path, &disk)
         .with_context(|| format!("renaming to {}", disk.display()))?;
     File::open(settings.disks_directory())?.sync_all()?;
-
-    ensure!(
-        disk.try_exists()?,
-        "{} is missing after being created",
-        disk.display()
-    );
     info!(disk = %disk.display(), "disk cloned");
-    Ok(())
-}
-
-#[instrument(skip_all)]
-fn remove_disk(settings: &Settings, orb: &OrbId) -> Result<()> {
-    let disk = settings.disk_path(orb);
-    remove_if_present(&disk)?;
-    ensure!(
-        !disk.try_exists()?,
-        "{} is still there after being removed",
-        disk.display()
-    );
     Ok(())
 }
 

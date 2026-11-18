@@ -10,7 +10,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
-use jorb_vmm::{Tap, VmShape, VmState};
+use jorb_vmm::{Tap, VmShape};
 use tokio::net::UnixStream;
 use tokio::time::{sleep, timeout};
 
@@ -72,13 +72,6 @@ pub async fn boot(settings: &Settings, orb: &OrbId, slot: Slot) -> Result<()> {
         },
     };
     jorb_vmm::boot(&socket, &shape).await
-}
-
-/// Ok only when the orb's VMM says its VM is running; otherwise, why not.
-pub async fn confirm_running(settings: &Settings, orb: &OrbId) -> Result<()> {
-    let state = jorb_vmm::state(&settings.api_socket_path(orb)).await?;
-    ensure!(state == VmState::Running, "the VM is {state:?}");
-    Ok(())
 }
 
 /// The policy only drops, so without its table an orb would reach the host

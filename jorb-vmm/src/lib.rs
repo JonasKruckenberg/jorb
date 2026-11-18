@@ -1,15 +1,7 @@
-//! A Cloud Hypervisor client, narrowed to the one VM shape jorb boots.
-//!
-//! The crate refuses to know about systemd, slots, orbs, Amp or where any of
-//! the paths it is handed came from. Nothing from the generated client is
-//! re-exported, so the rest of jorb can only express the shape this crate
-//! allows.
-//!
-//! An API socket is the only name for a VM: [`boot`] and [`state`] both take
-//! one, and there is no handle type to keep in step with it. Nothing here
-//! stops or deletes a VM, and nothing cleans up on failure. A VM's lifetime
-//! belongs to its systemd unit, and jorb is crash-only; see the failure model
-//! in `AGENTS.md`.
+//! A Cloud Hypervisor client narrowed to what jorb asks: boot the one VM shape
+//! jorb has, and say whether it is running. It knows nothing of systemd,
+//! slots or Amp, and nothing generated is re-exported. The API socket is the
+//! only name for a VM; nothing here stops a VM or cleans up after a failure.
 
 mod generated;
 
@@ -22,33 +14,26 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, ensure};
 use generated::types;
 
-/// How long one request to Cloud Hypervisor's API may take, connection
-/// included. The API is a unix socket on the same host and every call is a
-/// few hundred bytes of JSON, so anything slower is a VMM that has stopped
-/// answering.
+/// One request over a local socket; anything slower is a VMM not answering.
 const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Cloud Hypervisor sizes memory in bytes; jorb thinks in MiB.
 const BYTES_PER_MIB: i64 = 1024 * 1024;
 
-/// The fixed VM shape. Every field is required, so a VM with no disk or no
-/// network cannot be asked for. Huge pages are always off, serial goes to
-/// stdout, the virtio console is off, and a size-0 balloon reports free pages.
+/// Every field is required, so a VM with no disk or no network cannot be
+/// asked for. Huge pages off, serial to stdout, console off, and a size-0
+/// balloon that reports free pages are not choices.
 #[derive(Debug, Clone, Copy)]
 pub struct VmShape<'a> {
     pub kernel: &'a Path,
     pub cmdline: &'a str,
     pub cpus: NonZeroU8,
     pub memory_mib: NonZeroU32,
-    /// Writable; the guest sees it as `/dev/vda`.
+    /// Writable; `/dev/vda` in the guest.
     pub root_disk: &'a Path,
-    /// Read-only; the guest sees it as `/dev/vdb`.
+    /// Read-only; `/dev/vdb` in the guest.
     pub read_only_disk: &'a Path,
     pub tap: Tap<'a>,
 }
 
-/// The guest's one interface. Cloud Hypervisor creates the tap if the host
-/// does not have it yet.
 #[derive(Debug, Clone, Copy)]
 pub struct Tap<'a> {
     pub name: &'a str,
@@ -56,66 +41,39 @@ pub struct Tap<'a> {
     pub netmask: Ipv4Addr,
 }
 
-/// What Cloud Hypervisor says about the VM behind an API socket.
-///
-/// `Absent` is this crate's own, and it is the single answer for every way of
-/// having no VM: no socket, a socket nothing is listening on, and a VMM that
-/// is up but was never given a VM.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VmState {
-    Absent,
-    Created,
-    Running,
-    Shutdown,
-    Paused,
-    BreakPoint,
-}
-
-/// Creates the VM on the VMM listening at `socket`, boots it, and returns only
-/// once the VMM reports it running.
+/// Creates and boots the VM on the VMM at `socket`, and returns once the VMM
+/// reports it running.
 pub async fn boot(socket: &Path, shape: &VmShape<'_>) -> Result<()> {
     let client = client(socket)?;
-    let at = || socket.display().to_string();
     client
         .create_vm()
         .body(configuration(shape)?)
         .send()
         .await
-        .with_context(|| format!("vm.create on {}", at()))?;
+        .with_context(|| format!("vm.create on {}", socket.display()))?;
     client
         .boot_vm()
         .send()
         .await
-        .with_context(|| format!("vm.boot on {}", at()))?;
-
-    let state = state(socket).await?;
-    ensure!(
-        state == VmState::Running,
-        "the VM on {} is {state:?} after booting",
-        at()
-    );
-    Ok(())
+        .with_context(|| format!("vm.boot on {}", socket.display()))?;
+    running(socket).await
 }
 
-/// What the VMM at `socket` says about its VM, in one request.
-pub async fn state(socket: &Path) -> Result<VmState> {
-    if !socket.try_exists()? {
-        return Ok(VmState::Absent);
-    }
-    match client(socket)?.vm_info().send().await {
-        Ok(info) => Ok(VmState::from(info.into_inner().state)),
-        // A socket with no listener is debris a dead VMM left behind.
-        Err(progenitor_client::Error::CommunicationError(source)) if source.is_connect() => {
-            Ok(VmState::Absent)
-        }
-        // The VMM answers 404 until a VM is created on it.
-        Err(progenitor_client::Error::ErrorResponse(response))
-            if response.status() == reqwest::StatusCode::NOT_FOUND =>
-        {
-            Ok(VmState::Absent)
-        }
-        Err(error) => Err(error).with_context(|| format!("vm.info on {}", socket.display())),
-    }
+/// Ok when the VMM at `socket` reports its VM running; otherwise, why not.
+pub async fn running(socket: &Path) -> Result<()> {
+    ensure!(
+        socket.try_exists()?,
+        "there is no API socket at {}",
+        socket.display()
+    );
+    let info = client(socket)?
+        .vm_info()
+        .send()
+        .await
+        .with_context(|| format!("vm.info on {}", socket.display()))?;
+    let state = info.into_inner().state;
+    ensure!(state == types::VmState::Running, "the VM is {state:?}");
+    Ok(())
 }
 
 fn client(socket: &Path) -> Result<generated::Client> {
@@ -187,18 +145,6 @@ fn configuration(shape: &VmShape<'_>) -> Result<types::VmConfig> {
     )
 }
 
-impl From<types::VmState> for VmState {
-    fn from(state: types::VmState) -> Self {
-        match state {
-            types::VmState::Created => Self::Created,
-            types::VmState::Running => Self::Running,
-            types::VmState::Shutdown => Self::Shutdown,
-            types::VmState::Paused => Self::Paused,
-            types::VmState::BreakPoint => Self::BreakPoint,
-        }
-    }
-}
-
 /// Turns a generated builder into its config, naming the field it refused.
 fn assembled<B, T>(builder: B) -> Result<T>
 where
@@ -220,8 +166,6 @@ fn path_string(path: &Path) -> String {
 mod tests {
     use super::*;
 
-    /// The shape from the Fixed interfaces section of AGENTS.md, with the v1
-    /// sizing.
     fn fixed_shape() -> VmShape<'static> {
         VmShape {
             kernel: Path::new("/var/lib/jorb/kernel"),
@@ -251,17 +195,5 @@ mod tests {
             serde_json::to_string_pretty(&sent).unwrap(),
             serde_json::to_string_pretty(&golden).unwrap(),
         );
-    }
-
-    #[test]
-    fn a_socket_that_is_not_there_has_no_vm() {
-        let state = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(state(Path::new("/run/jorb/definitely-not-here.sock")))
-            .unwrap();
-
-        assert_eq!(state, VmState::Absent);
     }
 }

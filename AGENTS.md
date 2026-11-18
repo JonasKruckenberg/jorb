@@ -92,7 +92,7 @@ jorb knows nothing about the guest and jorb-init nothing about Amp; the config d
 | Crate | Role | Dependencies (allowlist) |
 |---|---|---|
 | `jorb` (bin) | One request: parse, lock, recover, operate, report | `jorb-vmm`, `jorb-config-disk`, `tokio` (current-thread), `tracing`, `tracing-subscriber` (json), `anyhow`, `rustix` |
-| `jorb-vmm` (lib) | The generated Cloud Hypervisor client behind `VmShape`, `boot(socket, shape)`, `state(socket)`. Knows nothing of systemd, slots or Amp | `progenitor-client`, `reqwest` (no default features, `json`), `serde`, `serde_json`, `anyhow`; dev: `tokio`; build: `progenitor`, `openapiv3`, `serde_yaml` |
+| `jorb-vmm` (lib) | The generated Cloud Hypervisor client behind `VmShape`, `boot(socket, shape)`, `running(socket)`. Knows nothing of systemd, slots or Amp | `progenitor-client`, `reqwest` (no default features, `json`), `serde`, `serde_json`, `anyhow`; build: `progenitor`, `openapiv3`, `serde_yaml` |
 | `jorb-init` (bin, static musl) | Guest PID 1, synchronous | `jorb-config-disk`, `rustix`, `tracing`, `tracing-subscriber` (json), `anyhow` |
 | `jorb-config-disk` (lib) | The config disk's type, shared so the two cannot drift | `serde`, `serde_json` |
 

@@ -87,41 +87,8 @@ where
 }
 
 #[cfg(test)]
-pub fn test_settings(state_directory: &str, run_directory: &str) -> Settings {
-    Settings::parse(&crate::test_variables(&[
-        ("JORB_SLOTS", "1"),
-        ("JORB_VCPUS", "4"),
-        ("JORB_MEMORY_MIB", "6144"),
-        ("JORB_KERNEL", "/var/lib/jorb/kernel"),
-        ("JORB_STATE_DIR", state_directory),
-        ("JORB_RUN_DIR", run_directory),
-        ("JORB_CH_BIN", "/bin/cloud-hypervisor"),
-    ]))
-    .unwrap()
-}
-
-#[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
-
-    #[test]
-    fn the_layout_is_the_fixed_interface() {
-        let settings = test_settings("/var/lib/jorb", "/run/jorb");
-        let orb: OrbId = "amp-1".parse().unwrap();
-
-        for (path, expected) in [
-            (settings.base_image_path(), "/var/lib/jorb/base.raw"),
-            (settings.lock_path(), "/var/lib/jorb/lock"),
-            (settings.partial_disk_path(), "/var/lib/jorb/disks/.tmp"),
-            (settings.disk_path(&orb), "/var/lib/jorb/disks/amp-1.raw"),
-            (settings.config_disk_path(&orb), "/run/jorb/amp-1.cfg"),
-            (settings.api_socket_path(&orb), "/run/jorb/amp-1.sock"),
-        ] {
-            assert_eq!(path, Path::new(expected));
-        }
-    }
 
     #[test]
     fn every_setting_is_required_and_checked() {

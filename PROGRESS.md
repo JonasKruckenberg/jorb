@@ -24,7 +24,7 @@ aarch64-darwin laptop with no Linux builder, where `nix flake check` skips
 in an aarch64 Linux container, every flake output is evaluated (`nix eval`
 of each `drvPath`; the module check's evaluation runs the NixOS assertions),
 and the rendered `inet jorb` table passes `nft --check` in a container.
-At the last commit: 13 tests pass, every output evaluates, the table checks,
+At the last commit: 11 tests pass, every output evaluates, the table checks,
 shellcheck is clean.
 
 ## Gate results
@@ -52,8 +52,9 @@ A1–A8 and A12 are verified; A11 awaits the host.
    request and redelivers a spawn for a healthy orb, that restart loses the
    orb's in-memory state. Whether Amp does either is not documented. Matrix
    section 3 tests the current behaviour.
-3. The Amp image's `latest` tag moves within hours; refreshing the pin means
-   rerunning `tests/host/amp-image.sh`.
+3. The Amp image's `latest` tag moves within hours; `nix/image.nix` says how
+   to refresh the pin. Its check script is deleted, so a new pin is verified
+   by the end-to-end run.
 
 ## Proposals
 

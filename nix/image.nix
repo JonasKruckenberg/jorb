@@ -3,8 +3,9 @@
 # survive into the ext4. Everything happens in a scratch directory and the
 # result is renamed into place, so a kill leaves no base or a whole one.
 #
-# The `latest` tag moves often, so the digest is pinned; tests/host/amp-image.sh
-# prints the current one.
+# The `latest` tag moves often, so the digest is pinned. The current one:
+#   skopeo inspect --format '{{.Digest}}' docker://us-central1-docker.pkg.dev/amp-prod-0/amp-orb/amp-orb-arm64:latest
+# After changing it, the end-to-end run in PLAN.md re-verifies A7 and A8.
 {
   writeShellApplication,
   e2fsprogs,
