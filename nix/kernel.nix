@@ -1,9 +1,5 @@
-# The guest kernel: one uncompressed image per host architecture, built from
-# the architecture's defconfig plus the fragments in this directory.
-#
-# A jorb host boots guests of its own architecture, so this never cross-builds:
-# aarch64 hosts get arch/arm64/boot/Image, x86_64 hosts get the uncompressed
-# vmlinux that Cloud Hypervisor enters through PVH.
+# The guest kernel: an uncompressed arm64 Image, built from defconfig plus
+# the fragments in this directory.
 #
 # Cloud Hypervisor's source tree ships no reference guest config (its
 # ch_defconfig lives in the cloud-hypervisor/linux fork, which would be a
@@ -28,27 +24,9 @@
 }:
 
 let
-  inherit (stdenv.hostPlatform) isAarch64;
-
-  guest =
-    if isAarch64 then
-      {
-        arch = "arm64";
-        fragment = ./guest-kernel-arm64.config;
-        target = "Image";
-        built = "arch/arm64/boot/Image";
-      }
-    else
-      {
-        arch = "x86";
-        fragment = ./guest-kernel-x86.config;
-        target = "vmlinux";
-        built = "vmlinux";
-      };
-
   fragments = [
     ./guest-kernel.config
-    guest.fragment
+    ./guest-kernel-arm64.config
   ];
 in
 
@@ -75,7 +53,7 @@ stdenv.mkDerivation {
   # fight it.
   hardeningDisable = [ "all" ];
 
-  env.ARCH = guest.arch;
+  env.ARCH = "arm64";
 
   postPatch = ''
     patchShebangs scripts
@@ -92,26 +70,23 @@ stdenv.mkDerivation {
 
   buildPhase = ''
     runHook preBuild
-    make -j"$NIX_BUILD_CORES" ${guest.target}
+    make -j"$NIX_BUILD_CORES" Image
     runHook postBuild
   '';
 
-  # One name whatever the architecture, because this is what jorb passes as
-  # JORB_KERNEL. The config travels with it so a gate can show what booted.
+  # `kernel` is what jorb passes as JORB_KERNEL. The config travels with it so
+  # a gate can show what booted.
   installPhase = ''
     runHook preInstall
     mkdir -p "$out"
-    cp ${guest.built} "$out/kernel"
+    cp arch/arm64/boot/Image "$out/kernel"
     cp .config "$out/config"
     runHook postInstall
   '';
 
   meta = {
     description = "Guest kernel for jorb's Cloud Hypervisor microVMs";
-    platforms = [
-      "aarch64-linux"
-      "x86_64-linux"
-    ];
+    platforms = [ "aarch64-linux" ];
     license = lib.licenses.gpl2Only;
   };
 }

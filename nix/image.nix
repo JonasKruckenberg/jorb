@@ -10,7 +10,6 @@
 # move often, which is the reason jorb pins a digest rather than a tag.
 {
   lib,
-  stdenv,
   writeShellApplication,
   coreutils,
   e2fsprogs,
@@ -24,21 +23,10 @@
 let
   registry = "us-central1-docker.pkg.dev/amp-prod-0/amp-orb";
 
-  images = {
-    aarch64 = {
-      repository = "${registry}/amp-orb-arm64";
-      # Recorded by G6 on 2026-11-18.
-      digest = "sha256:e25e30674cc051a6477fe9b148da1627f4186828dbd18e3151deeaa0d8ce1e68";
-    };
-    x86_64 = {
-      repository = "${registry}/amp-orb";
-      # Recorded with skopeo inspect --override-arch amd64 on 2026-11-18;
-      # awaiting a G6 run on an x86_64 host.
-      digest = "sha256:a431746a91926c0686942b73ab0ccfa03e23eb96f5a647612e5948ec4e68729b";
-    };
+  image = {
+    repository = "${registry}/amp-orb-arm64";
+    digest = "sha256:e25e30674cc051a6477fe9b148da1627f4186828dbd18e3151deeaa0d8ce1e68";
   };
-
-  image = images.${stdenv.hostPlatform.parsed.cpu.name};
 in
 
 writeShellApplication {

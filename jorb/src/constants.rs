@@ -64,14 +64,8 @@ pub const GUEST_INTERFACE: &str = "eth0";
 pub const GUEST_NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 252);
 
 /// The guest's serial console, which carries its output to the host's
-/// journal. The two architectures name the same thing differently.
-//
-// A3, verified by G4 on 2026-11-18: what the guest writes to this port
-// reaches the unit's journal.
-#[cfg(target_arch = "aarch64")]
+/// journal.
 pub const CONSOLE_DEVICE: &str = "ttyAMA0";
-#[cfg(target_arch = "x86_64")]
-pub const CONSOLE_DEVICE: &str = "ttyS0";
 
 /// Public resolvers, because orbs may not talk to anything on the host's
 /// network, including its resolver.

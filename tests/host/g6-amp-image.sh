@@ -2,7 +2,7 @@
 # G6: the Amp orb image is what jorb-init expects, and what `amp orb
 # bootstrap` does when it starts.
 #
-# Pulls the image for this host's architecture, prints the digest to pin in
+# Pulls the arm64 image, prints the digest to pin in
 # nix/image.nix, unpacks it rootless, checks A7 (glibc, setpriv, the user
 # `user`, /usr/local/bin/amp) and then runs bootstrap with a dummy token to
 # see whether it stays in the foreground, which is A8.
@@ -11,11 +11,7 @@ here=$(dirname "$0")
 # shellcheck source-path=SCRIPTDIR
 . "$here/lib.sh"
 
-case $(uname -m) in
-aarch64) image=${JORB_AMP_IMAGE:-us-central1-docker.pkg.dev/amp-prod-0/amp-orb/amp-orb-arm64:latest} ;;
-x86_64) image=${JORB_AMP_IMAGE:-us-central1-docker.pkg.dev/amp-prod-0/amp-orb/amp-orb:latest} ;;
-*) fail "no Amp orb image is published for $(uname -m)" ;;
-esac
+image=${JORB_AMP_IMAGE:-us-central1-docker.pkg.dev/amp-prod-0/amp-orb/amp-orb-arm64:latest}
 
 work=${JORB_GATE_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/g6-XXXXXX")}
 mkdir -p "$work"

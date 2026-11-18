@@ -45,13 +45,9 @@ mib() {
 	echo "$(($1 / 1024 / 1024)) MiB"
 }
 
-# The console the guest kernel writes to, which differs by architecture.
+# The console the guest kernel writes to.
 console_device() {
-	case $(uname -m) in
-	aarch64) echo ttyAMA0 ;;
-	x86_64) echo ttyS0 ;;
-	*) fail "no console device known for $(uname -m)" ;;
-	esac
+	echo ttyAMA0
 }
 
 # The kernel cmdline from the Fixed interfaces section of AGENTS.md.

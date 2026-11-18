@@ -21,12 +21,8 @@
     }:
     let
       inherit (nixpkgs) lib;
-      # Linux only: Cloud Hypervisor needs KVM, and a jorb host boots guests of
-      # its own architecture.
-      defaultSystems = [
-        "aarch64-linux"
-        "x86_64-linux"
-      ];
+      # jorb supports one platform: aarch64 NixOS.
+      defaultSystems = [ "aarch64-linux" ];
       forAllSystems =
         fn:
         lib.genAttrs defaultSystems (

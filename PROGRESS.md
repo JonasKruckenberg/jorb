@@ -5,7 +5,7 @@
 | Task | State |
 |---|---|
 | T0 repository skeleton | done |
-| T1 guest kernel | done on aarch64; the x86_64 half is written but unbuilt |
+| T1 guest kernel | done (aarch64 is the only platform since S2) |
 | T2 generated client spike | done. A9 and A10 verified |
 | T3 host gates | G1, G2, G6 and G8 pass. G3 needs the XFS partition. G4, G5 and G7 await a run as root |
 | T4 jorb-vmm API | done but for the host example, which awaits G4's harness |
@@ -536,9 +536,7 @@ change, so it waits on the owner.
 4. The `latest` tags on the Amp orb images move often: the arm64 digest
    changed between two G6 runs less than an hour apart. T6 pins a digest, and
    refreshing it means running G6 again.
-5. x86_64 is prepared throughout but nothing has been built or run on an
-   x86_64 host. The guest kernel fragment for it, the PVH boot path and the
-   amd64 image digest are all unexercised.
+5. Removed by S2: jorb supports aarch64 NixOS only.
 
 ## Proposals
 
@@ -550,9 +548,8 @@ change, so it waits on the owner.
    cleanly, so recover could have stopped a gate mid-run. Both are out of reach
    by name now, and recover no longer asks systemd for each unit's slice to
    tell them apart.
-2. **x86_64 hosts.** Added at the owner's request during this session. It
-   changes one thing in Fixed interfaces: the cmdline's console is `ttyS0` on
-   x86_64 rather than `ttyAMA0`. Everything else is per-architecture Nix.
+2. **A second architecture.** Added at the owner's request and removed again
+   by S2, when the owner scoped jorb to aarch64 NixOS.
 
 ## Notes per task
 
@@ -581,20 +578,12 @@ change, so it waits on the owner.
   `cloud-hypervisor/linux` fork (branch `ch-7.2.8`). Pulling that fork would add
   a second, unpinned source, so the kernel starts from `defconfig` plus
   fragments, which is the plan's fallback.
-- The fragments are `nix/guest-kernel.config` (what both architectures need)
-  plus `nix/guest-kernel-arm64.config` or `nix/guest-kernel-x86.config`.
+- The fragments are `nix/guest-kernel.config` plus
+  `nix/guest-kernel-arm64.config`.
   `nix/kernel-config-check.sh` fails the build if the final `.config` does not
   honour every line of them, so a symbol that loses its dependencies cannot
   slip through to a guest that will not boot.
-- x86_64 hosts were added at the owner's request. A jorb host boots guests of
-  its own architecture, so nothing cross-builds: aarch64 produces
-  `arch/arm64/boot/Image`, x86_64 produces the uncompressed `vmlinux` that
-  Cloud Hypervisor enters through PVH (`CONFIG_PVH=y`). Both install as
-  `$out/kernel`.
-- The x86_64 fragment is the plan's required list translated to that
-  architecture: 8250 serial with console instead of PL011, CMOS RTC instead of
-  PL031, ACPI and MMCONFIG instead of a device-tree PCI host bridge, and no
-  page size option because x86_64 is 4K-paged already.
+- A second architecture was built out here and removed by S2.
 
 ### T2
 
@@ -651,7 +640,7 @@ Notes:
   allow that.
 - The Amp orb images, from https://ampcode.com/docs/orbs/self-hosted:
   `us-central1-docker.pkg.dev/amp-prod-0/amp-orb/amp-orb-arm64:latest` for
-  aarch64 and `.../amp-orb:latest` for x86_64. The arm64 digest at the time of
+  aarch64. The arm64 digest at the time of
   writing is
   `sha256:c231df95186127aea0c68fd3642323629a0e65157b275e98d5d16e89ed1e0805`.
 - The same page lists the hosts an orb needs to reach: `ampcode.com:443`,
@@ -978,3 +967,19 @@ constants only they used. `jorb` now refuses any argument.
 - The container check: fmt and clippy clean, 27 tests pass. Neither deleted
   module had tests.
 - AGENTS.md's Contract bullet about commands is rewritten to match.
+
+### S2. Remove x86_64
+
+Confirmed at every place the review named, plus two more in `tests/host`
+(`lib.sh`'s console lookup and `g6-amp-image.sh`'s image choice). Removed all
+of them; the kernel derivation now builds `arch/arm64/boot/Image` only.
+
+- `git grep -i x86 -- ':!*.lock'`: nothing. Read literally, `grep -ri x86 .`
+  also searches `target/` and `.git`, which hold build products and history,
+  so the tracked-files form is the check that means something. This section
+  of PROGRESS.md avoids the word for the same reason.
+- `nix eval` of `packages.aarch64-linux.{guest-kernel,jorb-prepare-image}.drvPath`:
+  both evaluate. Building them needs the host.
+- `nixfmt --check flake.nix nix/*.nix` and `shellcheck -x` over every script:
+  clean. The container check: clean, 27 tests pass.
+- `nix flake check`: not run on Linux.
