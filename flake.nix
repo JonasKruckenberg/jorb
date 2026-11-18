@@ -28,11 +28,16 @@
         pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml
       );
 
+      # jorb-vmm's client is generated from the spec in the source of the very
+      # Cloud Hypervisor the module runs, so the two cannot drift.
+      chOpenapiSpec = "${pkgs.cloud-hypervisor.src}/vmm/src/api/openapi/cloud-hypervisor.yaml";
+
       # Only what a Rust build reads, so editing the notes rebuilds nothing.
       common = {
         pname = "jorb-workspace";
         version = "0.1.0";
         strictDeps = true;
+        CH_OPENAPI_SPEC = chOpenapiSpec;
         src = lib.fileset.toSource {
           root = ./.;
           fileset = lib.fileset.unions [
@@ -42,6 +47,7 @@
             ./jorb
             ./jorb-config-disk
             ./jorb-init
+            ./jorb-vmm
           ];
         };
       };
@@ -127,6 +133,7 @@
           skopeo
           umoci
         ];
+        CH_OPENAPI_SPEC = chOpenapiSpec;
       };
 
       checks.${system} = {

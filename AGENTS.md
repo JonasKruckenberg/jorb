@@ -65,14 +65,14 @@ Changing anything here is a design change. Propose it first.
 
 **Slots.** `S` in `0..JORB_SLOTS`, at most 256: tap `jorb<S>`, host `10.77.S.1/30`, guest `10.77.S.2`. A slot is free when its tap is absent; no free slot is the capacity error.
 
-**Config disk** (`jorb-config-disk`): UTF-8 `KEY=VALUE\n` lines, NUL-padded to 4096 bytes, second disk, read-only. Keys `ORB_TOKEN`, `AMP_URL`; values with a newline or NUL are refused. "Identical" is byte equality.
+**Config disk** (`jorb-config-disk`): the serde type `ConfigDisk { orb_token, amp_url }` as JSON, space-padded to 4096 bytes, second disk, read-only. Both binaries compile against the one type. "Identical" is byte equality.
 
-**VM shape**, all on Cloud Hypervisor's command line so the VMM boots the VM as it starts and exits when the guest powers off:
+**VM shape**, created and booted through Cloud Hypervisor's API by `jorb-vmm`, whose client is generated from the spec of the exact Cloud Hypervisor the module runs. The unit runs only `cloud-hypervisor --api-socket=<socket>`.
 
 - Kernel `$JORB_KERNEL`, no initramfs; cmdline `console=ttyAMA0 root=/dev/vda rw init=/jorb-init ip=10.77.S.2::10.77.S.1:255.255.255.252:<orb-id>:eth0:off:1.1.1.1:9.9.9.9`.
 - Disks: root (read-write), then config disk (read-only), both `image_type=raw`.
 - The slot's tap; `$JORB_VCPUS` vCPUs; `$JORB_MEMORY_MIB` memory, THP off; balloon of size 0 with free page reporting; serial to stdout (the journal), console off.
-- Running means `ch-remote info` reports `Running`.
+- Running means `vm.info` reports `Running`.
 
 **`jorb-init`** (guest PID 1), in order:
 
@@ -91,19 +91,20 @@ jorb knows nothing about the guest and jorb-init nothing about Amp; the config d
 
 | Crate | Role | Dependencies (allowlist) |
 |---|---|---|
-| `jorb` (bin) | One job: parse, lock, recover, operate, report | `jorb-config-disk`, `tokio` (current-thread), `serde_json`, `tracing`, `tracing-subscriber` (json), `anyhow`, `rustix`, `secrecy` |
+| `jorb` (bin) | One job: parse, lock, recover, operate, report | `jorb-vmm`, `jorb-config-disk`, `tokio` (current-thread), `tracing`, `tracing-subscriber` (json), `anyhow`, `rustix` |
+| `jorb-vmm` (lib) | The generated Cloud Hypervisor client behind `VmShape`, `boot(socket, shape)`, `state(socket)`. Knows nothing of systemd, slots or Amp | `progenitor-client`, `reqwest` (no default features, `json`), `serde`, `serde_json`, `thiserror`; dev: `tokio`; build: `progenitor`, `openapiv3`, `serde_yaml` |
 | `jorb-init` (bin, static musl) | Guest PID 1, synchronous | `jorb-config-disk`, `rustix`, `tracing`, `tracing-subscriber` (json), `anyhow` |
-| `jorb-config-disk` (lib) | The config disk's format, shared so the two cannot drift | none |
+| `jorb-config-disk` (lib) | The config disk's type, shared so the two cannot drift | `serde`, `serde_json` |
 
 ## Rust conventions
 
 - Edition 2024; toolchain from the flake. Add dependencies with `cargo add`, then read docs.rs for that version rather than trust memory. `unsafe_code = "forbid"`; `rustix` covers the syscalls.
 - Each module opens with a short `//!` paragraph: what it is for and what it refuses to know. Code reads top-down, entry point first. Comment only what the code cannot say.
 - Use the project's words (orb, job, operation, primitive, slot, base image, disk, config disk, gate) and whole words otherwise (`id`, `vm`, `ip`, `api`, `cpu`, `mib` allowed). No `Manager`, `Handler`, `Helper`, `Util`, `Service`, `Context`, `Info`, `Data`. A new type or module must remove a state or a duplication.
-- Parse at the edge, once: `OrbId`, `Job`, `Settings`, `ConfigDisk` are built only by fallible parsers. No boolean parameters in public functions. No traits or generics for hypothetical use. No handle type for what a path already names.
+- Parse at the edge, once: `OrbId`, `Job` and `Settings` are built only by fallible parsers. No boolean parameters in public functions. No traits or generics for hypothetical use. No handle type for what a path already names.
 - Errors: `anyhow` with `.context(...)`; no `unwrap`, `expect`, `panic!`, `todo!`, `dbg!` outside tests (clippy enforces it). Never build a shell string.
 - Bounds: every loop's exit is visible at the loop (a finite iterator or a deadline); every wait and external call has a timeout; the job has a deadline below Amp's. Durations and counts are named in `jorb/src/limits.rs`; names, paths and programs live where they are used. The one unbounded loop is `jorb-init`'s reap, in a function returning `!`. No recursion.
-- Logging is `tracing`, JSON. Dashboard fields: `op`, `orb`, `slot`, `outcome`, `elapsed_ms`. `ORB_TOKEN` is a `SecretString` from parsing on and never reaches logs, argv, errors, subprocesses or a persistent disk.
+- Logging is `tracing`, JSON. Dashboard fields: `op`, `orb`, `slot`, `outcome`, `elapsed_ms`. `ORB_TOKEN` goes straight into `ConfigDisk`, whose `Debug` omits it, and never reaches logs, argv, errors, subprocesses or a persistent disk.
 - Unit-test pure functions; tests need no root, KVM or network. Host checks are `tests/host/`.
 
 ## Security

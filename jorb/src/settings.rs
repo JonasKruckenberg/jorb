@@ -22,7 +22,6 @@ pub struct Settings {
     pub kernel: PathBuf,
     pub state_directory: PathBuf,
     pub run_directory: PathBuf,
-    /// `ch-remote` is the API client beside it.
     pub cloud_hypervisor: PathBuf,
 }
 

@@ -6,7 +6,6 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, bail, ensure};
 use jorb_config_disk::ConfigDisk;
-use secrecy::{ExposeSecret, SecretString};
 
 use crate::{Environment, limits, required};
 
@@ -17,7 +16,7 @@ pub struct Job {
 }
 
 /// Only a spawn carries a config disk, so a spawn without a token cannot be
-/// represented.
+/// represented. The config disk holds the token; its `Debug` does not show it.
 #[derive(Debug)]
 pub enum Operation {
     Spawn(ConfigDisk),
@@ -30,10 +29,14 @@ impl Job {
         let orb = required(environment, "ORB_ID")?.parse()?;
         let operation = match required(environment, "ORB_OPERATION")?.as_str() {
             "spawn" => {
-                let token = environment("ORB_TOKEN")?
-                    .map(SecretString::from)
-                    .context("spawn needs ORB_TOKEN, and this job has none")?;
-                Operation::Spawn(config_disk(&token, environment("AMP_URL")?.as_deref())?)
+                let config_disk = ConfigDisk {
+                    orb_token: environment("ORB_TOKEN")?
+                        .context("spawn needs ORB_TOKEN, and this job has none")?,
+                    amp_url: environment("AMP_URL")?,
+                };
+                ensure!(!config_disk.orb_token.is_empty(), "ORB_TOKEN is empty");
+                config_disk.encode().context("encoding the config disk")?;
+                Operation::Spawn(config_disk)
             }
             "pause" => Operation::Pause,
             "delete" => Operation::Delete,
@@ -52,16 +55,6 @@ impl Operation {
             Self::Delete => "delete",
         }
     }
-}
-
-/// The token and, when the provider has one, the Amp endpoint.
-pub fn config_disk(token: &SecretString, amp_url: Option<&str>) -> Result<ConfigDisk> {
-    let token = token.expose_secret();
-    ensure!(!token.is_empty(), "ORB_TOKEN is empty");
-
-    let mut entries = vec![("ORB_TOKEN", token)];
-    entries.extend(amp_url.map(|url| ("AMP_URL", url)));
-    Ok(ConfigDisk::encode(&entries)?)
 }
 
 /// Safe unescaped as a file name, a unit name and a hostname.
@@ -147,17 +140,7 @@ mod tests {
         let Operation::Spawn(disk) = job.operation else {
             panic!("a spawn");
         };
-        assert!(
-            disk.as_bytes()
-                .starts_with(b"ORB_TOKEN=must-not-leak\nAMP_URL=https://amp.example\n")
-        );
-
-        let refusal = config_disk(&"two\nlines".into(), None)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            refusal.contains("ORB_TOKEN") && !refusal.contains("two"),
-            "{refusal}"
-        );
+        assert_eq!(disk.orb_token, "must-not-leak");
+        assert_eq!(disk.amp_url.as_deref(), Some("https://amp.example"));
     }
 }

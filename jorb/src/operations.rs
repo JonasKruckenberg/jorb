@@ -81,7 +81,7 @@ pub async fn spawn(
     running: &[OrbId],
 ) -> Result<()> {
     let current = std::fs::read(settings.config_disk_path(orb)).ok();
-    if running.contains(orb) && current.as_deref() == Some(config_disk.as_bytes()) {
+    if running.contains(orb) && current == Some(config_disk.encode()?) {
         info!("already running with this config");
         return Ok(());
     }
@@ -168,12 +168,12 @@ async fn start(settings: &Settings, orb: &OrbId, config_disk: &ConfigDisk) -> Re
         .mode(0o600)
         .open(&config_path)
         .with_context(|| format!("creating {}", config_path.display()))?;
-    file.write_all(config_disk.as_bytes())?;
+    file.write_all(&config_disk.encode()?)?;
     file.sync_all()?;
 
-    let invocation = unit::start(orb, &vm::command(settings, orb, slot)).await?;
+    let invocation = unit::start(orb, &vm::vmm_command(settings, orb)).await?;
     info!(invocation, "started");
-    vm::wait_until_running(settings, orb)
+    vm::boot(settings, orb, slot)
         .await
         .with_context(|| format!("see journalctl _SYSTEMD_INVOCATION_ID={invocation}"))?;
     info!("running");

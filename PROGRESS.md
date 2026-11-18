@@ -10,16 +10,13 @@ Built: T0–T11 (`jorb`, `jorb-init`, `jorb-config-disk`, the guest kernel, the
 base image script, the NixOS module, observability, the host matrix). What is
 left is `PLAN.md`'s "Remaining": all of it needs the host or the owner.
 
-**Not yet observed on the host:** the command-line boot. jorb used to create
-and boot each VM over Cloud Hypervisor's API; it now passes the whole shape on
-the VMM's command line and reads state with `ch-remote info`. The CLI forms
-were checked against Cloud Hypervisor 54.1's source (`vmm/src/config.rs`,
-`cloud-hypervisor/src/main.rs`): `--disk` takes several values and
-`image_type=raw`, `--memory` takes `thp=off` (THP defaults on), `--serial`
-defaults to null and `--console` to tty, `ch-remote info` prints the API's
-JSON, and the VMM exits on a guest power-off. None of that has booted yet.
-Matrix section 4 also carries the in-guest checks the deleted gate scripts
-used to make.
+**Not yet observed on the host:** anything since the review. jorb was
+restructured, the config disk is now JSON (`jorb-config-disk`, serde), and the
+matrix and its stand-in bootstrap were rewritten. Boot still goes through
+Cloud Hypervisor's API via `jorb-vmm`; a short-lived change to booting from
+the command line was reverted at the owner's request, because it traded the
+generated, typed client for an unchecked string contract. Matrix section 4
+also carries the in-guest checks the deleted gate scripts used to make.
 
 **How checks run off the host.** This repository is also worked on from an
 aarch64-darwin laptop with no Linux builder, where `nix flake check` skips
@@ -27,7 +24,7 @@ aarch64-darwin laptop with no Linux builder, where `nix flake check` skips
 in an aarch64 Linux container, every flake output is evaluated (`nix eval`
 of each `drvPath`; the module check's evaluation runs the NixOS assertions),
 and the rendered `inet jorb` table passes `nft --check` in a container.
-At the last commit: 12 tests pass, every output evaluates, the table checks,
+At the last commit: 14 tests pass, every output evaluates, the table checks,
 shellcheck is clean.
 
 ## Gate results
@@ -42,9 +39,9 @@ shellcheck is clean.
 | G6 Amp image | PASS: A7 and A8 hold, digest pinned in `nix/image.nix`. `/usr/local/bin/amp` is a symlink into `/home/user/.amp`, which Amp replaces on startup |
 | G7 observability | awaiting a host run with the module installed |
 | G8 amp-cli | `nixpkgs#amp-cli` has `orb provider` and is unfree: A12 holds |
-| boot-check | PASS before the CLI change: A1, A2, A4 hold for the API-built VM |
+| boot-check (script since deleted) | PASS: A1, A2, A4 hold |
 
-A1–A8 and A12 are verified; A11 and A13 await the host.
+A1–A8 and A12 are verified; A11 awaits the host.
 
 ## Open questions
 

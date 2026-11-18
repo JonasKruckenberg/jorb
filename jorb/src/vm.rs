@@ -1,16 +1,18 @@
-//! The fixed VM shape as Cloud Hypervisor's command line, and the one
-//! question jorb asks a VMM: is your VM running?
+//! The fixed VM shape and booting it through `jorb-vmm`, plus the one question
+//! jorb asks a VMM: is your VM running?
 //!
-//! The whole configuration is on the command line, so the VMM boots the VM
-//! as it starts and exits when the guest powers off. A slot is free when its
-//! tap is absent: the VMM creates the tap and it goes with the process.
+//! A slot is free when its tap is absent: the VMM creates the tap when it
+//! creates the VM, and the tap goes with the process.
 
+use std::io::ErrorKind;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
-use tokio::time::sleep;
+use jorb_vmm::{Tap, VmShape, VmState};
+use tokio::net::UnixStream;
+use tokio::time::{sleep, timeout};
 
 use crate::job::OrbId;
 use crate::settings::Settings;
@@ -56,69 +58,75 @@ impl Slot {
     }
 }
 
-/// The orb's VMM, as its unit runs it.
-pub fn command(settings: &Settings, orb: &OrbId, slot: Slot) -> Vec<String> {
+fn cmdline(slot: Slot, orb: &OrbId) -> String {
     let (host, guest) = (slot.address(1), slot.address(2));
-    let path = |path: &Path| path.display().to_string();
+    format!("{CMDLINE_FIXED} ip={guest}::{host}:{NETMASK}:{orb}:{GUEST_INTERFACE}:off:{DNS}")
+}
 
+/// What the orb's unit runs: the VMM, waiting on its API socket for a VM.
+pub fn vmm_command(settings: &Settings, orb: &OrbId) -> Vec<String> {
     vec![
-        path(&settings.cloud_hypervisor),
+        settings.cloud_hypervisor.display().to_string(),
         format!("--api-socket={}", settings.api_socket_path(orb).display()),
-        "--kernel".into(),
-        path(&settings.kernel),
-        "--cmdline".into(),
-        format!("{CMDLINE_FIXED} ip={guest}::{host}:{NETMASK}:{orb}:{GUEST_INTERFACE}:off:{DNS}"),
-        "--cpus".into(),
-        format!("boot={}", settings.vcpus),
-        "--memory".into(),
-        format!("size={}M,thp=off", settings.memory_mib),
-        // Root first, so it is /dev/vda; both are raw, which the VMM requires
-        // to be said.
-        "--disk".into(),
-        format!("path={},image_type=raw", settings.disk_path(orb).display()),
-        format!(
-            "path={},readonly=on,image_type=raw",
-            settings.config_disk_path(orb).display()
-        ),
-        "--net".into(),
-        format!("tap={},ip={host},mask={NETMASK}", slot.tap()),
-        "--balloon".into(),
-        "size=0,free_page_reporting=on".into(),
-        // Serial to stdout, which is the unit's journal.
-        "--serial".into(),
-        "tty".into(),
-        "--console".into(),
-        "off".into(),
     ]
+}
+
+/// Waits for the VMM to listen, then creates and boots the orb's VM in
+/// `slot`. Returns once the VMM reports it running.
+pub async fn boot(settings: &Settings, orb: &OrbId, slot: Slot) -> Result<()> {
+    let socket = settings.api_socket_path(orb);
+    let deadline = Instant::now() + limits::API_SOCKET_WAIT;
+    while !listening(&socket).await? {
+        ensure!(
+            Instant::now() < deadline,
+            "nothing listened on {} in {:?}",
+            socket.display(),
+            limits::API_SOCKET_WAIT
+        );
+        sleep(limits::API_SOCKET_POLL).await;
+    }
+
+    let cmdline = cmdline(slot, orb);
+    let tap = slot.tap();
+    let shape = VmShape {
+        kernel: &settings.kernel,
+        cmdline: &cmdline,
+        cpus: settings.vcpus,
+        memory_mib: settings.memory_mib,
+        root_disk: &settings.disk_path(orb),
+        read_only_disk: &settings.config_disk_path(orb),
+        tap: Tap {
+            name: &tap,
+            host_address: slot.address(1),
+            netmask: NETMASK,
+        },
+    };
+    Ok(jorb_vmm::boot(&socket, &shape).await?)
+}
+
+/// The socket file appears before the VMM listens on it, so a missing file,
+/// a refused connection and a full backlog all mean "not yet".
+async fn listening(socket: &Path) -> Result<bool> {
+    match timeout(limits::API_SOCKET_POLL, UnixStream::connect(socket)).await {
+        Err(_) => Ok(false),
+        Ok(Ok(_)) => Ok(true),
+        Ok(Err(error))
+            if matches!(
+                error.kind(),
+                ErrorKind::NotFound | ErrorKind::ConnectionRefused
+            ) =>
+        {
+            Ok(false)
+        }
+        Ok(Err(error)) => Err(error).with_context(|| format!("connecting to {}", socket.display())),
+    }
 }
 
 /// Ok only when the orb's VMM says its VM is running; otherwise, why not.
 pub async fn confirm_running(settings: &Settings, orb: &OrbId) -> Result<()> {
-    let socket = settings.api_socket_path(orb);
-    ensure!(socket.try_exists()?, "there is no API socket");
-
-    let ch_remote = settings.cloud_hypervisor.with_file_name("ch-remote");
-    let info = run(
-        &ch_remote.display().to_string(),
-        &[&format!("--api-socket={}", socket.display()), "info"],
-    )
-    .await?;
-    let info: serde_json::Value = serde_json::from_str(&info).context("reading vm.info")?;
-    ensure!(info["state"] == "Running", "the VM is {}", info["state"]);
+    let state = jorb_vmm::state(&settings.api_socket_path(orb)).await?;
+    ensure!(state == VmState::Running, "the VM is {state:?}");
     Ok(())
-}
-
-pub async fn wait_until_running(settings: &Settings, orb: &OrbId) -> Result<()> {
-    let deadline = Instant::now() + limits::BOOT_WAIT;
-    loop {
-        match confirm_running(settings, orb).await {
-            Ok(()) => return Ok(()),
-            Err(error) if Instant::now() >= deadline => {
-                return Err(error.context(format!("not running after {:?}", limits::BOOT_WAIT)));
-            }
-            Err(_) => sleep(limits::BOOT_POLL).await,
-        }
-    }
 }
 
 /// The policy only drops, so without its table an orb would reach the host
@@ -134,24 +142,30 @@ pub async fn ensure_network_policy() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::test_settings;
 
     #[test]
-    fn the_command_is_the_fixed_vm_shape() {
-        let settings = test_settings("/var/lib/jorb", "/run/jorb");
-        let command = command(&settings, &"amp-1".parse().unwrap(), Slot(7));
-
+    fn the_cmdline_is_the_fixed_interface() {
         assert_eq!(
-            command.join(" "),
-            "/bin/cloud-hypervisor --api-socket=/run/jorb/amp-1.sock \
-             --kernel /var/lib/jorb/kernel \
-             --cmdline console=ttyAMA0 root=/dev/vda rw init=/jorb-init \
-             ip=10.77.7.2::10.77.7.1:255.255.255.252:amp-1:eth0:off:1.1.1.1:9.9.9.9 \
-             --cpus boot=4 --memory size=6144M,thp=off \
-             --disk path=/var/lib/jorb/disks/amp-1.raw,image_type=raw \
-             path=/run/jorb/amp-1.cfg,readonly=on,image_type=raw \
-             --net tap=jorb7,ip=10.77.7.1,mask=255.255.255.252 \
-             --balloon size=0,free_page_reporting=on --serial tty --console off"
+            cmdline(Slot(7), &"amp-1".parse().unwrap()),
+            "console=ttyAMA0 root=/dev/vda rw init=/jorb-init \
+             ip=10.77.7.2::10.77.7.1:255.255.255.252:amp-1:eth0:off:1.1.1.1:9.9.9.9"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_socket_is_ready_only_once_something_listens() {
+        let directory = std::env::temp_dir().join("jorb-tests");
+        std::fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("vmm.sock");
+        let _ = std::fs::remove_file(&socket);
+
+        assert!(!listening(&socket).await.unwrap(), "no file");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        assert!(listening(&socket).await.unwrap(), "a listener");
+        drop(listener);
+        assert!(
+            !listening(&socket).await.unwrap(),
+            "a file nobody listens on"
         );
     }
 }

@@ -237,15 +237,14 @@ section_5() {
 	[ "$settled" -lt "$peak" ] || note "the cgroup did not fall after the guest freed 900 MiB"
 }
 
-# 6. A VMM that never opens its socket fails the spawn within BOOT_WAIT, and
-# the next job of any orb removes it. (Section 8 covers one that stops
+# 6. A VMM that never opens its socket fails the spawn within API_SOCKET_WAIT,
+# and the next job of any orb removes it. (Section 8 covers one that stops
 # answering.)
 section_6() {
 	local orb=m6 fake=$work/fake started status=0
 	mkdir -p "$fake"
 	printf '#!/bin/sh\nexec sleep 600\n' >"$fake/cloud-hypervisor"
 	chmod +x "$fake/cloud-hypervisor"
-	ln -sf "$(dirname "$JORB_CH_BIN")/ch-remote" "$fake/ch-remote"
 
 	started=$(date +%s)
 	JORB_CH_BIN=$fake/cloud-hypervisor job spawn $orb $token || status=$?

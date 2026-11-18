@@ -12,7 +12,8 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::process::Command;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
+use jorb_config_disk::ConfigDisk;
 use rustix::mount::{MountFlags, mount};
 use rustix::process::{WaitOptions, waitpid};
 use rustix::system::{RebootCommand, reboot};
@@ -81,7 +82,10 @@ fn start_bootstrap() -> Result<u32> {
     let hostname = fs::read_to_string("/proc/sys/kernel/hostname")?;
     fs::write("/etc/hosts", hosts(hostname.trim())).context("writing /etc/hosts")?;
 
-    let environment = environment(&fs::read(IMAGE_ENVIRONMENT)?, &fs::read(CONFIG_DISK)?)?;
+    let environment = environment(
+        &fs::read_to_string(IMAGE_ENVIRONMENT)?,
+        &ConfigDisk::decode(&fs::read(CONFIG_DISK)?).context("reading the config disk")?,
+    );
     let bootstrap = Command::new(SETPRIV)
         .args([
             &format!("--reuid={USER}"),
@@ -105,18 +109,21 @@ fn hosts(hostname: &str) -> String {
     )
 }
 
-/// The image's variables, then who the guest runs as, then the config disk,
-/// which wins because it is what the host said about this orb.
-fn environment(image: &[u8], config_disk: &[u8]) -> Result<BTreeMap<String, String>> {
-    let mut environment: BTreeMap<_, _> = jorb_config_disk::parse(image)?.into_iter().collect();
+/// The image's `KEY=VALUE` lines, then who the guest runs as, then the config
+/// disk, which wins because it is what the host said about this orb.
+fn environment(image: &str, config_disk: &ConfigDisk) -> BTreeMap<String, String> {
+    let mut environment: BTreeMap<String, String> = image
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
     environment.insert("HOME".into(), HOME.into());
     environment.insert("USER".into(), USER.into());
-    environment.extend(jorb_config_disk::parse(config_disk)?);
-    ensure!(
-        environment.contains_key("ORB_TOKEN"),
-        "the config disk has no ORB_TOKEN"
-    );
-    Ok(environment)
+    environment.insert("ORB_TOKEN".into(), config_disk.orb_token.clone());
+    if let Some(amp_url) = &config_disk.amp_url {
+        environment.insert("AMP_URL".into(), amp_url.clone());
+    }
+    environment
 }
 
 /// Reaps every orphan until bootstrap exits. The one loop without a visible
@@ -156,21 +163,14 @@ fn power_off() -> ! {
 mod tests {
     use super::*;
 
-    fn disk(entries: &[(&str, &str)]) -> Vec<u8> {
-        jorb_config_disk::ConfigDisk::encode(entries)
-            .unwrap()
-            .as_bytes()
-            .to_vec()
-    }
-
     #[test]
-    fn the_config_disk_wins_and_must_carry_a_token() {
-        let image = b"PATH=/usr/bin:/bin\nAMP_URL=https://image.test\nORB_TOKEN=from-image\n";
-        let built = environment(
-            image,
-            &disk(&[("ORB_TOKEN", "from-host"), ("AMP_URL", "https://host.test")]),
-        )
-        .unwrap();
+    fn the_config_disk_wins_over_the_image() {
+        let image = "PATH=/usr/bin:/bin\nAMP_URL=https://image.test\nORB_TOKEN=from-image\n";
+        let config_disk = ConfigDisk {
+            orb_token: "from-host".into(),
+            amp_url: Some("https://host.test".into()),
+        };
+        let built = environment(image, &config_disk);
 
         for (key, value) in [
             ("PATH", "/usr/bin:/bin"),
@@ -181,9 +181,6 @@ mod tests {
         ] {
             assert_eq!(built[key], value);
         }
-
-        let refusal = environment(b"PATH=/bin\n", &disk(&[("AMP_URL", "x")])).unwrap_err();
-        assert!(refusal.to_string().contains("ORB_TOKEN"));
     }
 
     #[test]

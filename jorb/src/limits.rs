@@ -23,10 +23,9 @@ pub const LOCK_POLL: Duration = Duration::from_millis(200);
 pub const JOB_DEADLINE: Duration = Duration::from_secs(230);
 const _: () = assert!(LOCK_WAIT.as_secs() + JOB_DEADLINE.as_secs() < AMP_JOB_TIMEOUT.as_secs());
 
-/// How long a started VM has to report itself running, and how often to ask.
-/// One last question may still take `SUBPROCESS_TIMEOUT`.
-pub const BOOT_WAIT: Duration = Duration::from_secs(10);
-pub const BOOT_POLL: Duration = Duration::from_millis(100);
+/// How long a started VMM has to open its API socket, and how often to look.
+pub const API_SOCKET_WAIT: Duration = Duration::from_secs(10);
+pub const API_SOCKET_POLL: Duration = Duration::from_millis(50);
 
 /// A guest is switched off, not shut down, so stopping is a kill and a reap.
 pub const UNIT_STOP_TIMEOUT: Duration = Duration::from_secs(5);
