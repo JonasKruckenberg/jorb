@@ -4,14 +4,15 @@
 //! The state directory holds the base image, the lock and `disks/<id>.raw`;
 //! the run directory, a tmpfs, holds each orb's config disk and API socket.
 
+use std::collections::HashMap;
 use std::num::{NonZeroU8, NonZeroU32};
 use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{Context, Result, ensure};
 
-use crate::job::OrbId;
-use crate::{Environment, limits, required};
+use crate::request::OrbId;
+use crate::{limits, required};
 
 #[derive(Debug)]
 pub struct Settings {
@@ -26,15 +27,15 @@ pub struct Settings {
 }
 
 impl Settings {
-    pub fn from_environment(environment: Environment) -> Result<Self> {
+    pub fn parse(variables: &HashMap<String, String>) -> Result<Self> {
         let settings = Self {
-            slots: parsed(environment, "JORB_SLOTS")?,
-            vcpus: parsed(environment, "JORB_VCPUS")?,
-            memory_mib: parsed(environment, "JORB_MEMORY_MIB")?,
-            kernel: parsed(environment, "JORB_KERNEL")?,
-            state_directory: parsed(environment, "JORB_STATE_DIR")?,
-            run_directory: parsed(environment, "JORB_RUN_DIR")?,
-            cloud_hypervisor: parsed(environment, "JORB_CH_BIN")?,
+            slots: parsed(variables, "JORB_SLOTS")?,
+            vcpus: parsed(variables, "JORB_VCPUS")?,
+            memory_mib: parsed(variables, "JORB_MEMORY_MIB")?,
+            kernel: parsed(variables, "JORB_KERNEL")?,
+            state_directory: parsed(variables, "JORB_STATE_DIR")?,
+            run_directory: parsed(variables, "JORB_RUN_DIR")?,
+            cloud_hypervisor: parsed(variables, "JORB_CH_BIN")?,
         };
         ensure!(
             (1..=limits::MAX_SLOTS).contains(&settings.slots),
@@ -58,7 +59,7 @@ impl Settings {
         self.state_directory.join("disks")
     }
 
-    /// One name for the host, because one job runs at a time.
+    /// One name for the host, because one request runs at a time.
     pub fn partial_disk_path(&self) -> PathBuf {
         self.disks_directory().join(".tmp")
     }
@@ -76,18 +77,18 @@ impl Settings {
     }
 }
 
-fn parsed<T>(environment: Environment, name: &str) -> Result<T>
+fn parsed<T>(variables: &HashMap<String, String>, name: &str) -> Result<T>
 where
     T: FromStr,
     T::Err: std::error::Error + Send + Sync + 'static,
 {
-    let raw = required(environment, name)?;
+    let raw = required(variables, name)?;
     raw.parse().with_context(|| format!("{name} is {raw:?}"))
 }
 
 #[cfg(test)]
 pub fn test_settings(state_directory: &str, run_directory: &str) -> Settings {
-    Settings::from_environment(&crate::test_environment(&[
+    Settings::parse(&crate::test_variables(&[
         ("JORB_SLOTS", "1"),
         ("JORB_VCPUS", "4"),
         ("JORB_MEMORY_MIB", "6144"),
@@ -124,7 +125,7 @@ mod tests {
 
     #[test]
     fn every_setting_is_required_and_checked() {
-        assert!(Settings::from_environment(&crate::test_environment(&[])).is_err());
+        assert!(Settings::parse(&crate::test_variables(&[])).is_err());
 
         for (name, value) in [
             ("JORB_SLOTS", "0"),
@@ -143,7 +144,7 @@ mod tests {
             variables.retain(|(existing, _)| *existing != name);
             variables.push((name, value));
             assert!(
-                Settings::from_environment(&crate::test_environment(&variables)).is_err(),
+                Settings::parse(&crate::test_variables(&variables)).is_err(),
                 "{name}={value}"
             );
         }

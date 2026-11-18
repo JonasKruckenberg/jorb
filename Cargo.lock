@@ -413,6 +413,7 @@ dependencies = [
 name = "jorb-vmm"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "openapiv3",
  "progenitor",
  "progenitor-client",
@@ -420,7 +421,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "thiserror",
  "tokio",
 ]
 

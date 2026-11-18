@@ -5,8 +5,8 @@
 
 use anyhow::{Context, Result, ensure};
 
-use crate::job::OrbId;
-use crate::{limits, run};
+use crate::request::OrbId;
+use crate::{limits, run_program as run};
 
 const PREFIX: &str = "jorb-orb-";
 /// The host kills an orb before anything else.

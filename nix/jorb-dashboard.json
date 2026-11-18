@@ -161,7 +161,7 @@
     {
       "type": "stat",
       "title": "No free slot, last 24h",
-      "description": "Jobs refused because every slot was taken. This is the host's capacity error, and the only counter jorb keeps about it.",
+      "description": "Requests refused because every slot was taken. This is the host's capacity error, and the only counter jorb keeps about it.",
       "datasource": { "type": "loki", "uid": "${logs}" },
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 10 },
       "fieldConfig": {
@@ -189,12 +189,12 @@
     },
     {
       "type": "row",
-      "title": "Jobs",
+      "title": "Requests",
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 }
     },
     {
       "type": "timeseries",
-      "title": "Job duration by operation",
+      "title": "Request duration by operation",
       "description": "From jorb's own closing event. Amp gives up at five minutes; jorb's own deadline is four.",
       "datasource": { "type": "loki", "uid": "${logs}" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
@@ -219,8 +219,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Job outcomes",
-      "description": "Every job reports one outcome. A failure is a job whose postcondition was not observed, which is also a non-zero exit to Amp.",
+      "title": "Request outcomes",
+      "description": "Every request reports one outcome. A failure is a request whose postcondition was not observed, which is also a non-zero exit to Amp.",
       "datasource": { "type": "loki", "uid": "${logs}" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
       "fieldConfig": {
@@ -243,8 +243,8 @@
     },
     {
       "type": "logs",
-      "title": "Failed jobs",
-      "description": "The error each failed job reported, with the orb it was for.",
+      "title": "Failed requests",
+      "description": "The error each failed request reported, with the orb it was for.",
       "datasource": { "type": "loki", "uid": "${logs}" },
       "gridPos": { "h": 9, "w": 24, "x": 0, "y": 27 },
       "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" },

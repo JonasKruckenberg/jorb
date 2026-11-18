@@ -1,41 +1,34 @@
-//! What Amp asked for, parsed once from untrusted `ORB_*` variables. This is
-//! the privilege boundary: every refusal jorb makes of Amp's input is here.
+//! What Amp asked for, parsed once from the untrusted `ORB_*` variables. This
+//! is the privilege boundary: every refusal jorb makes of Amp's input is here.
 
+use std::collections::HashMap;
 use std::fmt;
+use std::io;
 use std::str::FromStr;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Result, bail, ensure};
 use jorb_config_disk::ConfigDisk;
 
-use crate::{Environment, limits, required};
+use crate::operations::Operation;
+use crate::{limits, required};
 
 #[derive(Debug)]
-pub struct Job {
+pub struct Request {
     pub orb: OrbId,
     pub operation: Operation,
 }
 
-/// Only a spawn carries a config disk, so a spawn without a token cannot be
-/// represented. The config disk holds the token; its `Debug` does not show it.
-#[derive(Debug)]
-pub enum Operation {
-    Spawn(ConfigDisk),
-    Pause,
-    Delete,
-}
-
-impl Job {
-    pub fn from_environment(environment: Environment) -> Result<Self> {
-        let orb = required(environment, "ORB_ID")?.parse()?;
-        let operation = match required(environment, "ORB_OPERATION")?.as_str() {
+impl Request {
+    pub fn parse(variables: &HashMap<String, String>) -> Result<Self> {
+        let orb = required(variables, "ORB_ID")?.parse()?;
+        let operation = match required(variables, "ORB_OPERATION")? {
             "spawn" => {
                 let config_disk = ConfigDisk {
-                    orb_token: environment("ORB_TOKEN")?
-                        .context("spawn needs ORB_TOKEN, and this job has none")?,
-                    amp_url: environment("AMP_URL")?,
+                    orb_token: required(variables, "ORB_TOKEN")?.to_owned(),
+                    amp_url: variables.get("AMP_URL").cloned(),
                 };
                 ensure!(!config_disk.orb_token.is_empty(), "ORB_TOKEN is empty");
-                config_disk.encode().context("encoding the config disk")?;
+                config_disk.write_to(io::sink())?;
                 Operation::Spawn(config_disk)
             }
             "pause" => Operation::Pause,
@@ -43,17 +36,6 @@ impl Job {
             other => bail!("ORB_OPERATION is {other:?}, which is not spawn, pause or delete"),
         };
         Ok(Self { orb, operation })
-    }
-}
-
-impl Operation {
-    /// As Amp spells it, for the `op` log field.
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Spawn(_) => "spawn",
-            Self::Pause => "pause",
-            Self::Delete => "delete",
-        }
     }
 }
 
@@ -87,10 +69,10 @@ impl fmt::Display for OrbId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_environment;
+    use crate::test_variables;
 
-    fn parse(variables: &[(&str, &str)]) -> Result<Job> {
-        Job::from_environment(&test_environment(variables))
+    fn parse(variables: &[(&str, &str)]) -> Result<Request> {
+        Request::parse(&test_variables(variables))
     }
 
     #[test]
@@ -128,16 +110,16 @@ mod tests {
 
     #[test]
     fn the_token_reaches_the_config_disk_and_nowhere_else() {
-        let job = parse(&[
+        let request = parse(&[
             ("ORB_OPERATION", "spawn"),
             ("ORB_ID", "amp-1"),
             ("ORB_TOKEN", "must-not-leak"),
             ("AMP_URL", "https://amp.example"),
         ])
         .unwrap();
-        assert!(!format!("{job:?}").contains("must-not-leak"));
+        assert!(!format!("{request:?}").contains("must-not-leak"));
 
-        let Operation::Spawn(disk) = job.operation else {
+        let Operation::Spawn(disk) = request.operation else {
             panic!("a spawn");
         };
         assert_eq!(disk.orb_token, "must-not-leak");

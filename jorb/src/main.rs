@@ -1,17 +1,18 @@
-//! One Amp orb job: parse the environment, take the lock, recover, run the
+//! One request from Amp: parse the environment, take the lock, run the
 //! operation, report. Exit 0 means the operation's postcondition was
 //! observed.
 //!
 //! jorb is crash-only: the start path is the recovery path, nothing is
 //! cleaned up on the way out, and no error branch tidies anything.
 
-mod job;
 mod limits;
 mod operations;
+mod request;
 mod settings;
-mod unit;
+mod systemd;
 mod vm;
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -21,12 +22,8 @@ use tokio::process::Command;
 use tokio::time::{sleep, timeout};
 use tracing::{Level, debug, error, info, info_span};
 
-use crate::job::{Job, Operation};
+use crate::request::Request;
 use crate::settings::Settings;
-
-/// The process environment in a job, a table in a test. A variable that is
-/// set but not UTF-8 is an error, not absent.
-pub type Environment<'a> = &'a dyn Fn(&str) -> Result<Option<String>>;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
@@ -36,37 +33,29 @@ async fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
 
-    let environment = |name: &str| match std::env::var(name) {
-        Err(std::env::VarError::NotUnicode(_)) => bail!("{name} is not UTF-8"),
-        value => Ok(value.ok()),
-    };
-    let parsed = if std::env::args_os().len() > 1 {
-        Err(anyhow::anyhow!(
-            "jorb takes no arguments: the job is in the environment"
-        ))
-    } else {
-        Job::from_environment(&environment)
-            .and_then(|job| Ok((job, Settings::from_environment(&environment)?)))
-    };
-    let (job, settings) = match parsed {
+    let parsed = environment().and_then(|variables| {
+        ensure!(std::env::args_os().len() == 1, "jorb takes no arguments");
+        Ok((Request::parse(&variables)?, Settings::parse(&variables)?))
+    });
+    let (request, settings) = match parsed {
         Ok(parsed) => parsed,
         Err(error) => {
             error!(
                 outcome = "rejected",
                 error = format!("{error:#}"),
-                "bad job"
+                "bad request"
             );
             return ExitCode::FAILURE;
         }
     };
 
-    let _span = info_span!("job", op = job.operation.name(), orb = %job.orb).entered();
+    let _span = info_span!("request", op = request.operation.name(), orb = %request.orb).entered();
     let started = Instant::now();
-    let result = run_job(&job, &settings).await;
+    let result = run(&request, &settings).await;
     let elapsed_ms = started.elapsed().as_millis();
     match result {
         Ok(()) => {
-            info!(outcome = "ok", elapsed_ms, "job done");
+            info!(outcome = "ok", elapsed_ms, "request done");
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -74,30 +63,49 @@ async fn main() -> ExitCode {
                 outcome = "failed",
                 error = format!("{error:#}"),
                 elapsed_ms,
-                "job failed"
+                "request failed"
             );
             ExitCode::FAILURE
         }
     }
 }
 
-async fn run_job(job: &Job, settings: &Settings) -> Result<()> {
-    let _lock = lock(settings).await?;
-    timeout(limits::JOB_DEADLINE, async {
-        let running = operations::recover(settings).await?;
-        match &job.operation {
-            Operation::Spawn(config_disk) => {
-                operations::spawn(settings, &job.orb, config_disk, &running).await
+/// The variables jorb reads: `ORB_*` and `AMP_URL` from Amp, `JORB_*` from the
+/// root-side wrapper. One of those that is not UTF-8 is an error rather than
+/// absent; anything else in the environment is not jorb's business.
+fn environment() -> Result<HashMap<String, String>> {
+    let mut variables = HashMap::new();
+    for (name, value) in std::env::vars_os() {
+        let Ok(name) = name.into_string() else {
+            continue;
+        };
+        let ours = name.starts_with("ORB_") || name.starts_with("JORB_") || name == "AMP_URL";
+        match value.into_string() {
+            Ok(value) if ours => {
+                variables.insert(name, value);
             }
-            Operation::Pause => operations::pause(settings, &job.orb).await,
-            Operation::Delete => operations::delete(settings, &job.orb).await,
+            Err(_) if ours => bail!("{name} is not UTF-8"),
+            _ => {}
         }
-    })
-    .await
-    .with_context(|| format!("the job did not finish within {:?}", limits::JOB_DEADLINE))?
+    }
+    Ok(variables)
 }
 
-/// The host's one lock, held for the whole job, so no two jobs interleave.
+pub fn required<'a>(variables: &'a HashMap<String, String>, name: &str) -> Result<&'a str> {
+    variables
+        .get(name)
+        .map(String::as_str)
+        .with_context(|| format!("{name} is not set"))
+}
+
+async fn run(request: &Request, settings: &Settings) -> Result<()> {
+    let _lock = lock(settings).await?;
+    timeout(limits::REQUEST_DEADLINE, operations::run(settings, request))
+        .await
+        .with_context(|| format!("not finished within {:?}", limits::REQUEST_DEADLINE))?
+}
+
+/// The host's one lock, held for the whole request, so no two interleave.
 async fn lock(settings: &Settings) -> Result<File> {
     let path = settings.lock_path();
     let file = OpenOptions::new()
@@ -115,21 +123,17 @@ async fn lock(settings: &Settings) -> Result<File> {
                 sleep(limits::LOCK_POLL).await;
             }
             Err(TryLockError::WouldBlock) => {
-                bail!("another job held the lock for {:?}", limits::LOCK_WAIT)
+                bail!("another request held the lock for {:?}", limits::LOCK_WAIT)
             }
             Err(TryLockError::Error(error)) => return Err(error.into()),
         }
     }
 }
 
-pub fn required(environment: Environment, name: &str) -> Result<String> {
-    environment(name)?.with_context(|| format!("{name} is not set"))
-}
-
 /// Runs a program with separate arguments and returns its stdout. No shell,
 /// because `ORB_ID` reaches some arguments; no token in the child's
 /// environment; and a child that outlives the timeout is killed.
-pub async fn run(program: &str, arguments: &[&str]) -> Result<String> {
+pub async fn run_program(program: &str, arguments: &[&str]) -> Result<String> {
     debug!(program, ?arguments, "running");
     let output = timeout(
         limits::SUBPROCESS_TIMEOUT,
@@ -158,17 +162,9 @@ pub async fn run(program: &str, arguments: &[&str]) -> Result<String> {
 }
 
 #[cfg(test)]
-pub fn test_environment(
-    variables: &[(&str, &str)],
-) -> impl Fn(&str) -> Result<Option<String>> + use<> {
-    let variables: Vec<(String, String)> = variables
+pub fn test_variables(variables: &[(&str, &str)]) -> HashMap<String, String> {
+    variables
         .iter()
         .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-        .collect();
-    move |wanted| {
-        Ok(variables
-            .iter()
-            .find(|(name, _)| name == wanted)
-            .map(|(_, value)| value.clone()))
-    }
+        .collect()
 }

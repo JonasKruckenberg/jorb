@@ -12,16 +12,16 @@ pub const MAX_SLOTS: u16 = 256;
 /// Recover looks at no more units than there can be slots.
 pub const MAX_UNITS: usize = MAX_SLOTS as usize;
 
-/// How long Amp allows one job before it retries it.
-pub const AMP_JOB_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long Amp allows one request before it retries it.
+pub const AMP_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// The lock wait comes before the job deadline, and their sum must stay under
-/// Amp's timeout: a job still running when Amp retries is a second job against
+/// The lock wait comes before the request deadline, and their sum must stay under
+/// Amp's timeout: a request still running when Amp retries is a second request against
 /// the same orb.
 pub const LOCK_WAIT: Duration = Duration::from_secs(50);
 pub const LOCK_POLL: Duration = Duration::from_millis(200);
-pub const JOB_DEADLINE: Duration = Duration::from_secs(230);
-const _: () = assert!(LOCK_WAIT.as_secs() + JOB_DEADLINE.as_secs() < AMP_JOB_TIMEOUT.as_secs());
+pub const REQUEST_DEADLINE: Duration = Duration::from_secs(230);
+const _: () = assert!(LOCK_WAIT.as_secs() + REQUEST_DEADLINE.as_secs() < AMP_TIMEOUT.as_secs());
 
 /// How long a started VMM has to open its API socket, and how often to look.
 pub const API_SOCKET_WAIT: Duration = Duration::from_secs(10);

@@ -26,14 +26,14 @@ export JORB_CH_BIN JORB_KERNEL
 jorb=${JORB_BIN:-$(built .#jorb)/bin/jorb}
 token=matrix-dummy-token
 probe_tcp_port=47123
-# LOCK_WAIT plus JOB_DEADLINE in jorb/src/limits.rs; change it with them.
-job_deadline=280
+# LOCK_WAIT plus REQUEST_DEADLINE in jorb/src/limits.rs; change it with them.
+request_deadline=280
 boot_deadline=90
 failures=0
 
 # ------------------------------------------------------------------ harness
 
-job() {
+request() {
 	local operation=$1 orb=$2 job_token=${3:-}
 	env ORB_OPERATION="$operation" ORB_ID="$orb" ${job_token:+ORB_TOKEN="$job_token"} \
 		timeout 300 "$jorb" 2>>"$work/jorb.log"
@@ -76,7 +76,7 @@ expect() {
 	[ "$actual" = "$2" ] || note "$1 is '$actual', expected '$2'"
 }
 
-# Nothing a later job would trip over, except what a running orb may hold.
+# Nothing a later request would trip over, except what a running orb may hold.
 expect_no_debris() {
 	local allowed=${1:-} unit path
 	for unit in $(orb_units); do
@@ -151,12 +151,12 @@ section_1() {
 			if [ "$start" = absent ]; then
 				disk=absent
 			else
-				job spawn $orb $token || note "$start: setup spawn failed"
+				request spawn $orb $token || note "$start: setup spawn failed"
 			fi
-			if [ "$start" = stopped ]; then job pause $orb || note "$start: setup pause failed"; fi
+			if [ "$start" = stopped ]; then request pause $orb || note "$start: setup pause failed"; fi
 
 			for attempt in first second; do
-				job "$operation" $orb $token || note "$start/$operation ($attempt) failed"
+				request "$operation" $orb $token || note "$start/$operation ($attempt) failed"
 				expect $orb "$(wanted_for "$operation" "$disk")"
 			done
 			if [ "$operation" = spawn ]; then expect_no_debris $orb; else expect_no_debris; fi
@@ -165,7 +165,7 @@ section_1() {
 	done
 }
 
-# 2. Fifty jobs killed at random points, then convergence.
+# 2. Fifty requests killed at random points, then convergence.
 section_2() {
 	local orb=m2 round delay operation
 	for round in $(seq 1 50); do
@@ -176,7 +176,7 @@ section_2() {
 			timeout -s KILL "$delay" "$jorb" 2>/dev/null || true
 	done
 	for operation in spawn pause delete; do
-		job $operation $orb $token || note "$operation after the kills failed"
+		request $operation $orb $token || note "$operation after the kills failed"
 		expect $orb "$(wanted_for $operation)"
 	done
 	expect_no_debris
@@ -185,11 +185,11 @@ section_2() {
 # 3. An identical spawn leaves a healthy orb alone; a new token restarts it.
 section_3() {
 	local orb=m3 first identical changed
-	job spawn $orb $token || note "spawn failed"
+	request spawn $orb $token || note "spawn failed"
 	first=$(invocation_of $orb)
-	job spawn $orb $token || note "identical spawn failed"
+	request spawn $orb $token || note "identical spawn failed"
 	identical=$(invocation_of $orb)
-	job spawn $orb "$token-changed" || note "changed spawn failed"
+	request spawn $orb "$token-changed" || note "changed spawn failed"
 	changed=$(invocation_of $orb)
 	[ "$first" = "$identical" ] || note "an identical spawn restarted the VM"
 	[ "$first" != "$changed" ] || note "a changed token did not restart the VM"
@@ -203,7 +203,7 @@ section_4() {
 	systemd-socket-activate --listen="0.0.0.0:$probe_tcp_port" --accept cat >/dev/null 2>&1 &
 	listener=$!
 	started=$(date +%s)
-	job spawn $orb $token || note "spawn failed"
+	request spawn $orb $token || note "spawn failed"
 	invocation=$(invocation_of $orb)
 	within $boot_deadline logged "$invocation" ready || note "the guest never got to ready"
 	kill "$listener" 2>/dev/null || true
@@ -220,7 +220,7 @@ section_4() {
 # 5. Memory the orb frees comes back to the host.
 section_5() {
 	local orb=m5 invocation cgroup peak=0 current settled
-	job spawn $orb "workload-memory-$token" || note "spawn failed"
+	request spawn $orb "workload-memory-$token" || note "spawn failed"
 	invocation=$(invocation_of $orb)
 	cgroup=/sys/fs/cgroup$(systemctl show -p ControlGroup --value "$(unit_of $orb)")
 	within $boot_deadline logged "$invocation" 'memory allocating' || note "the workload never started"
@@ -238,7 +238,7 @@ section_5() {
 }
 
 # 6. A VMM that never opens its socket fails the spawn within API_SOCKET_WAIT,
-# and the next job of any orb removes it. (Section 8 covers one that stops
+# and the next request of any orb removes it. (Section 8 covers one that stops
 # answering.)
 section_6() {
 	local orb=m6 fake=$work/fake started status=0
@@ -247,13 +247,13 @@ section_6() {
 	chmod +x "$fake/cloud-hypervisor"
 
 	started=$(date +%s)
-	JORB_CH_BIN=$fake/cloud-hypervisor job spawn $orb $token || status=$?
+	JORB_CH_BIN=$fake/cloud-hypervisor request spawn $orb $token || status=$?
 	evidence "spawn exited $status after $(($(date +%s) - started))s"
 	[ "$status" -ne 0 ] || note "a spawn whose VMM never answered succeeded"
 	[ $(($(date +%s) - started)) -le 40 ] || note "it took too long to give up"
 
-	job pause m6b || note "the next job failed"
-	stopped $orb || note "the next job left the unit"
+	request pause m6b || note "the next request failed"
+	stopped $orb || note "the next request left the unit"
 	expect_no_debris
 }
 
@@ -261,38 +261,38 @@ section_6() {
 # gets the slot only once the first is gone.
 section_7() {
 	local first=m7a second=m7b inode
-	job spawn $first $token || note "spawn of $first failed"
+	request spawn $first $token || note "spawn of $first failed"
 	inode=$(stat -c %i "$JORB_STATE_DIR/disks/$first.raw")
 	pkill -9 -f "$JORB_RUN_DIR/$first.sock" || true
 	sleep 2
-	job spawn $first $token || note "spawn after the kill failed"
+	request spawn $first $token || note "spawn after the kill failed"
 	expect $first "$(wanted_for spawn)"
 	[ "$(stat -c %i "$JORB_STATE_DIR/disks/$first.raw")" = "$inode" ] || note "it came back on a new disk"
 
-	if job spawn $second $token; then note "$second started while $first held the only slot"; fi
-	job delete $first || note "delete of $first failed"
-	job spawn $second $token || note "$second did not take the freed slot"
+	if request spawn $second $token; then note "$second started while $first held the only slot"; fi
+	request delete $first || note "delete of $first failed"
+	request spawn $second $token || note "$second did not take the freed slot"
 	expect $second "$(wanted_for spawn)"
 }
 
 # 8. A stopped VMM does not block the delete that clears it.
 section_8() {
 	local started status=0
-	job spawn m8a $token || note "spawn failed"
+	request spawn m8a $token || note "spawn failed"
 	pkill -STOP -f "$JORB_RUN_DIR/m8a.sock" || note "no VMM to stop"
 	started=$(date +%s)
-	job delete m8a || status=$?
+	request delete m8a || status=$?
 	evidence "delete exited $status after $(($(date +%s) - started))s"
 	[ "$status" -eq 0 ] || note "the delete failed"
-	[ $(($(date +%s) - started)) -le $job_deadline ] || note "the delete overran the job deadline"
-	job spawn m8b $token || note "the next spawn failed"
+	[ $(($(date +%s) - started)) -le $request_deadline ] || note "the delete overran the request deadline"
+	request spawn m8b $token || note "the next spawn failed"
 	expect m8b "$(wanted_for spawn)"
 }
 
 # 9. When bootstrap exits the guest powers off, saying so once, without error.
 section_9() {
 	local orb=m9 invocation log
-	job spawn $orb "$token-exit-bootstrap" || note "spawn failed"
+	request spawn $orb "$token-exit-bootstrap" || note "spawn failed"
 	# Read now: the unit is collected seconds after the guest is ready.
 	invocation=$(invocation_of $orb)
 	within $boot_deadline stopped $orb || note "the unit did not stop"
@@ -307,7 +307,7 @@ section_10() {
 	local saved=$work/jorb-table.nft
 	nft list table inet jorb >"$saved"
 	nft delete table inet jorb
-	if job spawn m10 $token; then note "spawn succeeded without the policy"; fi
+	if request spawn m10 $token; then note "spawn succeeded without the policy"; fi
 	nft -f "$saved" || note "COULD NOT RESTORE inet jorb: orbs on this host are unconfined"
 	tail -n 3 "$work/jorb.log" | grep -q 'inet jorb is not loaded' || note "the failure did not name the table"
 	stopped m10 || note "a unit was started anyway"

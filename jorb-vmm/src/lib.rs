@@ -16,9 +16,10 @@ mod generated;
 use std::fmt::Display;
 use std::net::Ipv4Addr;
 use std::num::{NonZeroU8, NonZeroU32, NonZeroU64};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
+use anyhow::{Context, Result, anyhow, ensure};
 use generated::types;
 
 /// How long one request to Cloud Hypervisor's API may take, connection
@@ -70,86 +71,40 @@ pub enum VmState {
     BreakPoint,
 }
 
-/// What can go wrong talking to a Cloud Hypervisor over its API socket.
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("the API socket at {socket} could not be read")]
-    Socket {
-        socket: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("no HTTP client could be bound to the API socket at {socket}")]
-    Transport {
-        socket: PathBuf,
-        #[source]
-        source: reqwest::Error,
-    },
-
-    /// A request did not arrive, timed out, or was answered with something
-    /// the API does not promise.
-    //
-    // Boxed because progenitor's error is 160 bytes.
-    #[error("the {operation} request to the VMM at {socket} failed")]
-    Request {
-        socket: PathBuf,
-        operation: &'static str,
-        #[source]
-        source: Box<progenitor_client::Error>,
-    },
-
-    /// Create and boot were both accepted and the VMM still does not report a
-    /// running VM.
-    #[error("the VM on {socket} is {state:?} rather than running after being booted")]
-    NotRunning { socket: PathBuf, state: VmState },
-
-    /// The generated types refused a piece of the shape, which means this
-    /// crate asked for something it cannot express.
-    #[error("the VM configuration could not be assembled: {message}")]
-    Configuration { message: String },
-}
-
 /// Creates the VM on the VMM listening at `socket`, boots it, and returns only
 /// once the VMM reports it running.
-pub async fn boot(socket: &Path, shape: &VmShape<'_>) -> Result<(), Error> {
+pub async fn boot(socket: &Path, shape: &VmShape<'_>) -> Result<()> {
     let client = client(socket)?;
-
+    let at = || socket.display().to_string();
     client
         .create_vm()
         .body(configuration(shape)?)
         .send()
         .await
-        .map_err(|source| failed(socket, "vm.create", source))?;
-
+        .with_context(|| format!("vm.create on {}", at()))?;
     client
         .boot_vm()
         .send()
         .await
-        .map_err(|source| failed(socket, "vm.boot", source))?;
+        .with_context(|| format!("vm.boot on {}", at()))?;
 
-    match state(socket).await? {
-        VmState::Running => Ok(()),
-        state => Err(Error::NotRunning {
-            socket: socket.to_path_buf(),
-            state,
-        }),
-    }
+    let state = state(socket).await?;
+    ensure!(
+        state == VmState::Running,
+        "the VM on {} is {state:?} after booting",
+        at()
+    );
+    Ok(())
 }
 
 /// What the VMM at `socket` says about its VM, in one request.
-pub async fn state(socket: &Path) -> Result<VmState, Error> {
-    let exists = socket.try_exists().map_err(|source| Error::Socket {
-        socket: socket.to_path_buf(),
-        source,
-    })?;
-    if !exists {
+pub async fn state(socket: &Path) -> Result<VmState> {
+    if !socket.try_exists()? {
         return Ok(VmState::Absent);
     }
-
     match client(socket)?.vm_info().send().await {
         Ok(info) => Ok(VmState::from(info.into_inner().state)),
-        // A socket with no listener is debris a dead job left behind.
+        // A socket with no listener is debris a dead VMM left behind.
         Err(progenitor_client::Error::CommunicationError(source)) if source.is_connect() => {
             Ok(VmState::Absent)
         }
@@ -159,39 +114,25 @@ pub async fn state(socket: &Path) -> Result<VmState, Error> {
         {
             Ok(VmState::Absent)
         }
-        Err(source) => Err(failed(socket, "vm.info", source)),
+        Err(error) => Err(error).with_context(|| format!("vm.info on {}", socket.display())),
     }
 }
 
-fn client(socket: &Path) -> Result<generated::Client, Error> {
+fn client(socket: &Path) -> Result<generated::Client> {
     let client = reqwest::Client::builder()
         .unix_socket(socket)
         .timeout(API_REQUEST_TIMEOUT)
         .connect_timeout(API_REQUEST_TIMEOUT)
-        .build()
-        .map_err(|source| Error::Transport {
-            socket: socket.to_path_buf(),
-            source,
-        })?;
-
-    // The host part of the URL is never resolved: every connection goes to
-    // the socket.
+        .build()?;
+    // The host in the URL is never resolved: every connection goes to the socket.
     Ok(generated::Client::new_with_client(
         "http://localhost/api/v1",
         client,
     ))
 }
 
-fn failed(socket: &Path, operation: &'static str, source: progenitor_client::Error) -> Error {
-    Error::Request {
-        socket: socket.to_path_buf(),
-        operation,
-        source: Box::new(source),
-    }
-}
-
 /// The shape as Cloud Hypervisor's API wants it.
-fn configuration(shape: &VmShape<'_>) -> Result<types::VmConfig, Error> {
+fn configuration(shape: &VmShape<'_>) -> Result<types::VmConfig> {
     let cpus = NonZeroU64::from(shape.cpus);
 
     let mut disks = Vec::new();
@@ -259,14 +200,14 @@ impl From<types::VmState> for VmState {
 }
 
 /// Turns a generated builder into its config, naming the field it refused.
-fn assembled<B, T>(builder: B) -> Result<T, Error>
+fn assembled<B, T>(builder: B) -> Result<T>
 where
     B: TryInto<T>,
     B::Error: Display,
 {
-    builder.try_into().map_err(|message| Error::Configuration {
-        message: message.to_string(),
-    })
+    builder
+        .try_into()
+        .map_err(|message| anyhow!("assembling the VM configuration: {message}"))
 }
 
 /// Paths reach Cloud Hypervisor as strings. A path that is not UTF-8 would be

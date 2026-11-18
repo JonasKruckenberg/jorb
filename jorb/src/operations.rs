@@ -1,19 +1,20 @@
-//! The model. Every job runs `recover`, then its operation:
+//! The operations Amp asks for, and the four primitives they are made of.
+//! Every request runs `recover`, then its operation:
 //!
 //! | Operation | Composition |
 //! |---|---|
 //! | pause | `stop` |
 //! | delete | `stop`, `remove_disk` |
-//! | spawn | nothing if running with a byte-identical config disk; otherwise `stop`, `ensure_disk`, `start` |
+//! | spawn | nothing if running with an identical config disk; otherwise `stop`, `ensure_disk`, `start` |
 //!
 //! "Running without a disk" must be unreachable: the disk is created before
 //! the VM starts and the VM stopped before the disk goes. Each primitive
 //! establishes its own preconditions and observes its postcondition. Nothing
-//! cleans up on the way out; what a failed job leaves is the next one's
+//! cleans up on the way out; what a failed request leaves is the next one's
 //! `recover`'s.
 
 use std::fs::{File, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
@@ -21,13 +22,64 @@ use anyhow::{Context, Result, ensure};
 use jorb_config_disk::ConfigDisk;
 use tracing::{info, instrument, warn};
 
-use crate::job::OrbId;
+use crate::request::{OrbId, Request};
 use crate::settings::Settings;
-use crate::unit;
+use crate::systemd;
 use crate::vm::{self, Slot};
 
+/// Only a spawn carries a config disk, so a spawn without a token cannot be
+/// represented. The config disk's `Debug` omits the token.
+#[derive(Debug)]
+pub enum Operation {
+    Spawn(ConfigDisk),
+    Pause,
+    Delete,
+}
+
+impl Operation {
+    /// As Amp spells it, for the `op` log field.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Spawn(_) => "spawn",
+            Self::Pause => "pause",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+pub async fn run(settings: &Settings, request: &Request) -> Result<()> {
+    let running = recover(settings).await?;
+    let orb = &request.orb;
+    match &request.operation {
+        Operation::Spawn(config_disk) => {
+            if running.contains(orb)
+                && current_config_disk(settings, orb).as_ref() == Some(config_disk)
+            {
+                info!("already running with this config");
+                return Ok(());
+            }
+            stop(settings, orb).await?;
+            ensure_disk(settings, orb)?;
+            start(settings, orb, config_disk).await
+        }
+        Operation::Pause => stop(settings, orb).await,
+        Operation::Delete => {
+            stop(settings, orb).await?;
+            remove_disk(settings, orb)
+        }
+    }
+}
+
+/// What the orb's config disk says now. Unreadable counts as different, which
+/// restarts the orb with a fresh one. A changed token leaves the old VM unable
+/// to reach Amp, so only an equal config disk counts as healthy.
+fn current_config_disk(settings: &Settings, orb: &OrbId) -> Option<ConfigDisk> {
+    let file = File::open(settings.config_disk_path(orb)).ok()?;
+    ConfigDisk::read_from(file).ok()
+}
+
 /// Stops every orb unit whose VM is not confirmed running, and returns the
-/// orbs that are. Under the lock no job is mid-start, so such a unit is debris
+/// orbs that are. Under the lock no request is mid-start, so such a unit is debris
 /// or a VMM that has stopped answering; either way it holds a slot. The cost
 /// is that a VMM slower than the subprocess timeout is stopped while alive.
 ///
@@ -35,12 +87,12 @@ use crate::vm::{self, Slot};
 /// orb: a guest that powered off takes its unit with it, not its files, and
 /// a config disk holds a token.
 #[instrument(skip_all)]
-pub async fn recover(settings: &Settings) -> Result<Vec<OrbId>> {
+async fn recover(settings: &Settings) -> Result<Vec<OrbId>> {
     let mut running = Vec::new();
-    for orb in unit::orb_units()
+    for orb in systemd::orb_units()
         .await?
         .iter()
-        .filter_map(|unit| unit::orb_of(unit))
+        .filter_map(|unit| systemd::orb_of(unit))
     {
         match vm::confirm_running(settings, &orb).await {
             Ok(()) => {
@@ -52,7 +104,7 @@ pub async fn recover(settings: &Settings) -> Result<Vec<OrbId>> {
                 );
                 running.push(orb);
             }
-            // `recovered`, because `orb` is the job's own field.
+            // `recovered`, because `orb` is the request's own field.
             Err(reason) => {
                 warn!(recovered = %orb, reason = format!("{reason:#}"), "stopping");
                 stop(settings, &orb).await?;
@@ -72,37 +124,10 @@ pub async fn recover(settings: &Settings) -> Result<Vec<OrbId>> {
     Ok(running)
 }
 
-/// A changed token leaves the old VM unable to reach Amp, so only a
-/// byte-identical config disk counts as healthy.
-pub async fn spawn(
-    settings: &Settings,
-    orb: &OrbId,
-    config_disk: &ConfigDisk,
-    running: &[OrbId],
-) -> Result<()> {
-    let current = std::fs::read(settings.config_disk_path(orb)).ok();
-    if running.contains(orb) && current == Some(config_disk.encode()?) {
-        info!("already running with this config");
-        return Ok(());
-    }
-    stop(settings, orb).await?;
-    ensure_disk(settings, orb)?;
-    start(settings, orb, config_disk).await
-}
-
-pub async fn pause(settings: &Settings, orb: &OrbId) -> Result<()> {
-    stop(settings, orb).await
-}
-
-pub async fn delete(settings: &Settings, orb: &OrbId) -> Result<()> {
-    stop(settings, orb).await?;
-    remove_disk(settings, orb)
-}
-
 /// The config disk goes too: it holds the token, needed only while running.
 #[instrument(skip_all)]
 async fn stop(settings: &Settings, orb: &OrbId) -> Result<()> {
-    unit::stop(orb).await?;
+    systemd::stop(orb).await?;
     remove_if_present(&settings.api_socket_path(orb))?;
     remove_if_present(&settings.config_disk_path(orb))
 }
@@ -168,10 +193,10 @@ async fn start(settings: &Settings, orb: &OrbId, config_disk: &ConfigDisk) -> Re
         .mode(0o600)
         .open(&config_path)
         .with_context(|| format!("creating {}", config_path.display()))?;
-    file.write_all(&config_disk.encode()?)?;
+    config_disk.write_to(&mut file)?;
     file.sync_all()?;
 
-    let invocation = unit::start(orb, &vm::vmm_command(settings, orb)).await?;
+    let invocation = systemd::start(orb, &vm::vmm_command(settings, orb)).await?;
     info!(invocation, "started");
     vm::boot(settings, orb, slot)
         .await

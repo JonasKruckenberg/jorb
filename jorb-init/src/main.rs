@@ -46,6 +46,8 @@ fn main() -> ! {
 }
 
 fn start_bootstrap() -> Result<u32> {
+    // ===== Filesystems: what a userspace expects beyond the kernel's devtmpfs =====
+
     // devpts keeps device nodes, so a pty can be opened by its path.
     let ordinary = MountFlags::NOSUID | MountFlags::NODEV;
     for (filesystem, target, flags, options) in [
@@ -70,9 +72,13 @@ fn start_bootstrap() -> Result<u32> {
         symlink(target, link).with_context(|| format!("linking {link}"))?;
     }
 
+    // ===== Writeback: pause is a power cut, so flush within a second =====
+
     for knob in ["dirty_expire_centisecs", "dirty_writeback_centisecs"] {
         fs::write(format!("/proc/sys/vm/{knob}"), DIRTY_CENTISECS)?;
     }
+
+    // ===== Names: resolvers and the orb's own hostname =====
 
     // The kernel's `ip=` leaves the resolvers in resolv.conf's own format, and
     // sets the hostname to the orb id, which DNS cannot answer for.
@@ -82,10 +88,11 @@ fn start_bootstrap() -> Result<u32> {
     let hostname = fs::read_to_string("/proc/sys/kernel/hostname")?;
     fs::write("/etc/hosts", hosts(hostname.trim())).context("writing /etc/hosts")?;
 
-    let environment = environment(
-        &fs::read_to_string(IMAGE_ENVIRONMENT)?,
-        &ConfigDisk::decode(&fs::read(CONFIG_DISK)?).context("reading the config disk")?,
-    );
+    // ===== Bootstrap: the image's environment plus the config disk, as `user` =====
+
+    let config_disk =
+        ConfigDisk::read_from(fs::File::open(CONFIG_DISK)?).context("reading the config disk")?;
+    let environment = environment(&fs::read_to_string(IMAGE_ENVIRONMENT)?, &config_disk);
     let bootstrap = Command::new(SETPRIV)
         .args([
             &format!("--reuid={USER}"),

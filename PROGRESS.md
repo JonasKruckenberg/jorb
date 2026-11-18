@@ -24,7 +24,7 @@ aarch64-darwin laptop with no Linux builder, where `nix flake check` skips
 in an aarch64 Linux container, every flake output is evaluated (`nix eval`
 of each `drvPath`; the module check's evaluation runs the NixOS assertions),
 and the rendered `inet jorb` table passes `nft --check` in a container.
-At the last commit: 14 tests pass, every output evaluates, the table checks,
+At the last commit: 13 tests pass, every output evaluates, the table checks,
 shellcheck is clean.
 
 ## Gate results
@@ -48,8 +48,8 @@ A1–A8 and A12 are verified; A11 awaits the host.
 1. `[owner]` v1's sizing (1 slot, 6 GiB per orb) was chosen against 8 GiB; the
    host has 16. Keep it?
 2. `[owner]` A spawn restarts a running orb unless the config disk is
-   byte-identical, so a new token restarts it. If Amp mints a token per spawn
-   job and redelivers a spawn for a healthy orb, that restart loses the
+   equal, so a new token restarts it. If Amp mints a token per spawn
+   request and redelivers a spawn for a healthy orb, that restart loses the
    orb's in-memory state. Whether Amp does either is not documented. Matrix
    section 3 tests the current behaviour.
 3. The Amp image's `latest` tag moves within hours; refreshing the pin means

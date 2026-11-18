@@ -1,6 +1,6 @@
 # jorb
 
-Self-hosted Amp orb provider. `amp orb provider` runs `jorb` once per job; `jorb` turns the job into a Cloud Hypervisor microVM on one host: a Mac mini M2, 16 GiB RAM, aarch64 Asahi NixOS, 16K host pages.
+Self-hosted Amp orb provider. `amp orb provider` runs `jorb` once per request; `jorb` turns the request into a Cloud Hypervisor microVM on one host: a Mac mini M2, 16 GiB RAM, aarch64 Asahi NixOS, 16K host pages.
 
 Read `PLAN.md` (what is left) and `PROGRESS.md` (state, gate results, open questions) before any work.
 
@@ -9,7 +9,7 @@ Read `PLAN.md` (what is left) and `PROGRESS.md` (state, gate results, open quest
 1. Correctness by construction: make invalid states unrepresentable or unreachable.
 2. Simplicity: the fewest states, branches and moving parts that satisfy the contract.
 3. Small, typed interfaces. No speculative code.
-4. Observability: every job explains itself in structured logs.
+4. Observability: every request explains itself in structured logs.
 
 The earlier wins a conflict. A feature not in `PLAN.md` is out of scope; argue for it under "Proposals" in `PROGRESS.md`.
 
@@ -20,17 +20,17 @@ Source of truth: https://ampcode.com/docs/orbs/self-hosted. Re-read it rather th
 - Input is environment only: `ORB_OPERATION` (`spawn` | `pause` | `delete`), `ORB_ID`, and on spawn `ORB_TOKEN` and optionally `AMP_URL`. jorb takes no arguments; one is an error. v1 ignores `ORB_IMAGE`, `ORB_SNAPSHOT_ID` and `ORB_TYPE`, and the sudo rule does not carry them.
 - Every operation is safe to repeat and finishes within five minutes.
 - Exit 0 if and only if the operation's postcondition was observed.
-- Assume at-least-once delivery and concurrent jobs.
+- Assume at-least-once delivery and concurrent requests.
 
 ## Model
 
-An orb is two facts: *disk exists* and *VM running*. "Running without disk" is unreachable: create the disk before starting, stop before unlinking. Every job takes one global lock (`File::lock` on `/var/lib/jorb/lock`), runs `recover`, then its operation:
+An orb is two facts: *disk exists* and *VM running*. "Running without disk" is unreachable: create the disk before starting, stop before unlinking. Every request takes one global lock (`File::lock` on `/var/lib/jorb/lock`), runs `recover`, then its operation:
 
 | Operation | Composition |
 |---|---|
 | pause | `stop` |
 | delete | `stop`, `remove_disk` |
-| spawn | nothing if running with a byte-identical config disk; otherwise `stop`, `ensure_disk`, `start` |
+| spawn | nothing if running with an equal config disk; otherwise `stop`, `ensure_disk`, `start` |
 
 Each primitive establishes its own preconditions (truncate `disks/.tmp`, remove a stale socket, overwrite the config disk) and observes its postcondition: systemd's answer, the VMM's, a file. Never another tool's exit code.
 
@@ -38,8 +38,8 @@ Each primitive establishes its own preconditions (truncate `disks/.tmp`, remove 
 
 jorb is crash-only: the start path is the recovery path.
 
-- Any previous job may have died at any instruction; `kill -9`, a power cut and an error all leave something the next job handles the same way.
-- `recover` stops every `jorb-orb-*` unit whose VM it cannot confirm running, whosever it is. Under the lock no job is mid-start, so such a unit is debris or a VMM that stopped answering, and it holds a slot.
+- Any previous request may have died at any instruction; `kill -9`, a power cut and an error all leave something the next request handles the same way.
+- `recover` stops every `jorb-orb-*` unit whose VM it cannot confirm running, whosever it is. Under the lock no request is mid-start, so such a unit is debris or a VMM that stopped answering, and it holds a slot.
 - No cleanup on the way out: none in error branches, no `Drop` for external state, no signal handlers. A kill skips them anyway.
 - Fail early and loudly: one error event with the evidence, non-zero exit. No retries, fallbacks or silent repair. An observed invariant violation is a bug to report, not to paper over. Errors, not `panic!`.
 - A healthy orb is left alone. Orb units have no `Restart=`; only the provider restarts itself.
@@ -65,7 +65,7 @@ Changing anything here is a design change. Propose it first.
 
 **Slots.** `S` in `0..JORB_SLOTS`, at most 256: tap `jorb<S>`, host `10.77.S.1/30`, guest `10.77.S.2`. A slot is free when its tap is absent; no free slot is the capacity error.
 
-**Config disk** (`jorb-config-disk`): the serde type `ConfigDisk { orb_token, amp_url }` as JSON, space-padded to 4096 bytes, second disk, read-only. Both binaries compile against the one type. "Identical" is byte equality.
+**Config disk** (`jorb-config-disk`): the serde type `ConfigDisk { orb_token, amp_url }` as JSON, space-padded to 4096 bytes, second disk, read-only. Both binaries compile against the one type. "Equal" means equal when the existing disk is read back.
 
 **VM shape**, created and booted through Cloud Hypervisor's API by `jorb-vmm`, whose client is generated from the spec of the exact Cloud Hypervisor the module runs. The unit runs only `cloud-hypervisor --api-socket=<socket>`.
 
@@ -91,8 +91,8 @@ jorb knows nothing about the guest and jorb-init nothing about Amp; the config d
 
 | Crate | Role | Dependencies (allowlist) |
 |---|---|---|
-| `jorb` (bin) | One job: parse, lock, recover, operate, report | `jorb-vmm`, `jorb-config-disk`, `tokio` (current-thread), `tracing`, `tracing-subscriber` (json), `anyhow`, `rustix` |
-| `jorb-vmm` (lib) | The generated Cloud Hypervisor client behind `VmShape`, `boot(socket, shape)`, `state(socket)`. Knows nothing of systemd, slots or Amp | `progenitor-client`, `reqwest` (no default features, `json`), `serde`, `serde_json`, `thiserror`; dev: `tokio`; build: `progenitor`, `openapiv3`, `serde_yaml` |
+| `jorb` (bin) | One request: parse, lock, recover, operate, report | `jorb-vmm`, `jorb-config-disk`, `tokio` (current-thread), `tracing`, `tracing-subscriber` (json), `anyhow`, `rustix` |
+| `jorb-vmm` (lib) | The generated Cloud Hypervisor client behind `VmShape`, `boot(socket, shape)`, `state(socket)`. Knows nothing of systemd, slots or Amp | `progenitor-client`, `reqwest` (no default features, `json`), `serde`, `serde_json`, `anyhow`; dev: `tokio`; build: `progenitor`, `openapiv3`, `serde_yaml` |
 | `jorb-init` (bin, static musl) | Guest PID 1, synchronous | `jorb-config-disk`, `rustix`, `tracing`, `tracing-subscriber` (json), `anyhow` |
 | `jorb-config-disk` (lib) | The config disk's type, shared so the two cannot drift | `serde`, `serde_json` |
 
@@ -100,10 +100,10 @@ jorb knows nothing about the guest and jorb-init nothing about Amp; the config d
 
 - Edition 2024; toolchain from the flake. Add dependencies with `cargo add`, then read docs.rs for that version rather than trust memory. `unsafe_code = "forbid"`; `rustix` covers the syscalls.
 - Each module opens with a short `//!` paragraph: what it is for and what it refuses to know. Code reads top-down, entry point first. Comment only what the code cannot say.
-- Use the project's words (orb, job, operation, primitive, slot, base image, disk, config disk, gate) and whole words otherwise (`id`, `vm`, `ip`, `api`, `cpu`, `mib` allowed). No `Manager`, `Handler`, `Helper`, `Util`, `Service`, `Context`, `Info`, `Data`. A new type or module must remove a state or a duplication.
-- Parse at the edge, once: `OrbId`, `Job` and `Settings` are built only by fallible parsers. No boolean parameters in public functions. No traits or generics for hypothetical use. No handle type for what a path already names.
+- Use the project's words (orb, request, operation, primitive, slot, base image, disk, config disk, gate) and whole words otherwise (`id`, `vm`, `ip`, `api`, `cpu`, `mib` allowed). No `Manager`, `Handler`, `Helper`, `Util`, `Service`, `Context`, `Info`, `Data`. A new type or module must remove a state or a duplication.
+- Parse at the edge, once: `OrbId`, `Request` and `Settings` are built only by fallible parsers. No boolean parameters in public functions. No traits or generics for hypothetical use. No handle type for what a path already names.
 - Errors: `anyhow` with `.context(...)`; no `unwrap`, `expect`, `panic!`, `todo!`, `dbg!` outside tests (clippy enforces it). Never build a shell string.
-- Bounds: every loop's exit is visible at the loop (a finite iterator or a deadline); every wait and external call has a timeout; the job has a deadline below Amp's. Durations and counts are named in `jorb/src/limits.rs`; names, paths and programs live where they are used. The one unbounded loop is `jorb-init`'s reap, in a function returning `!`. No recursion.
+- Bounds: every loop's exit is visible at the loop (a finite iterator or a deadline); every wait and external call has a timeout; the request has a deadline below Amp's. Durations and counts are named in `jorb/src/limits.rs`; names, paths and programs live where they are used. The one unbounded loop is `jorb-init`'s reap, in a function returning `!`. No recursion.
 - Logging is `tracing`, JSON. Dashboard fields: `op`, `orb`, `slot`, `outcome`, `elapsed_ms`. `ORB_TOKEN` goes straight into `ConfigDisk`, whose `Debug` omits it, and never reaches logs, argv, errors, subprocesses or a persistent disk.
 - Unit-test pure functions; tests need no root, KVM or network. Host checks are `tests/host/`.
 
