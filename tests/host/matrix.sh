@@ -262,6 +262,17 @@ wait_until_ready() {
 	wait_for_guest_marker "$1" 'amp ready'
 }
 
+# How long an orb took from the spawn job starting to its bootstrap saying it
+# was ready, and when the guest kernel reached init by its own clock. The
+# second number is what tells a slow kernel from a slow host.
+record_latency() {
+	local orb=$1 started=$2 log
+	log=$(guest_log "$orb")
+	evidence "spawn to bootstrap ready: $(($(date +%s) - started))s"
+	evidence "kernel reached init: $(printf '%s\n' "$log" | grep -m1 'Run /jorb-init as init process' || echo 'not in the journal')"
+	evidence "kernel's last line before init: $(printf '%s\n' "$log" | grep -B1 -m1 'Run /jorb-init as init process' | head -n 1)"
+}
+
 # Whether the host carries the jorb module's own configuration. Sections 4 and
 # 5 test what that configuration does, so without it there is no policy to
 # hold and nowhere for MemoryHigh to reclaim to, and saying so is better than
@@ -490,12 +501,14 @@ section_4() {
 		return
 	fi
 
-	local orb=m4 listener
+	local orb=m4 listener started
 	systemd-socket-activate --listen="0.0.0.0:$probe_tcp_port" --accept cat >/dev/null 2>&1 &
 	listener=$!
 
+	started=$(date +%s)
 	job spawn "$orb" "$token" || note "the spawn failed"
 	wait_until_ready "$orb" || true
+	record_latency "$orb" "$started"
 	kill "$listener" 2>/dev/null || true
 
 	local probes
@@ -732,10 +745,12 @@ section_9() {
 	wipe_everything
 	mkdir -p "$JORB_STATE_DIR/disks" "$JORB_RUN_DIR"
 
-	local orb=m9 invocation log exits errors waited=0 stopped=
+	local orb=m9 invocation log exits errors waited=0 stopped= started
 
+	started=$(date +%s)
 	job spawn "$orb" "$token-exit-bootstrap" || note "the spawn failed"
 	wait_until_ready "$orb" || true
+	record_latency "$orb" "$started"
 	# Read now: once the unit is collected, guest_log has nothing to go on.
 	invocation=$(systemctl show -p InvocationID --value "$(unit_of "$orb")")
 

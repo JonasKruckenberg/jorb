@@ -1533,3 +1533,14 @@ Confirmed: the check read single options and never forced
   (/var/lib/jorb/inside.img) is inside stateDirectory (/var/lib/jorb), where
   mounting it would hide it." With the real value it evaluates.
 - nixfmt clean. Building the check needs Linux.
+
+### V4. Spawn-to-bootstrap latency
+
+- Matrix sections 4 and 9 now record, per spawn, the seconds from the job
+  starting to the stand-in's `amp ready`, the kernel's own timestamp on
+  `Run /jorb-init as init process`, and the line the kernel logged just
+  before it. The 0.9 s against 13 s difference in earlier runs is a kernel
+  timestamp, so the line before init is what should show where the time
+  went (a device probe, entropy, a timeout). Nothing is tuned until a host
+  run says why.
+- shellcheck clean. `[host]` awaiting a run.
