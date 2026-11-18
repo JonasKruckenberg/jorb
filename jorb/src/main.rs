@@ -8,8 +8,8 @@
 
 mod constants;
 mod host;
+mod job;
 mod orb;
-mod request;
 mod systemd;
 
 use std::env::VarError;
@@ -24,8 +24,8 @@ use tokio::time::{sleep, timeout};
 use tracing::{Level, debug, error, info, info_span, instrument};
 
 use crate::host::HostConfig;
+use crate::job::{ConfigDisk, Job};
 use crate::orb::Orb;
-use crate::request::{ConfigDisk, Operation, Request};
 
 /// What one run of jorb was given.
 ///
@@ -35,7 +35,7 @@ use crate::request::{ConfigDisk, Operation, Request};
 /// below.
 #[derive(Debug)]
 struct Invocation {
-    request: Request,
+    job: Job,
     host: HostConfig,
 }
 
@@ -80,9 +80,9 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let parsed = Request::from_environment(&process_environment).and_then(|request| {
+    let parsed = Job::from_environment(&process_environment).and_then(|job| {
         Ok(Invocation {
-            request,
+            job,
             host: HostConfig::from_environment(&process_environment)?,
         })
     });
@@ -100,8 +100,8 @@ async fn main() -> ExitCode {
 
     let span = info_span!(
         "job",
-        op = ?invocation.request.operation,
-        orb = %invocation.request.orb
+        op = invocation.job.operation(),
+        orb = %invocation.job.orb()
     );
     let _entered = span.enter();
 
@@ -146,8 +146,7 @@ struct Transition {
 /// gives up would become a second job against the same orb.
 async fn run_job(invocation: &Invocation) -> Result<Transition> {
     let host = &invocation.host;
-    let request = &invocation.request;
-    let orb = Orb::new(host, &request.orb);
+    let orb = Orb::new(host, invocation.job.orb());
 
     let _lock = take_host_lock(&host.lock()).await?;
 
@@ -158,10 +157,10 @@ async fn run_job(invocation: &Invocation) -> Result<Transition> {
         // under the lock this is either Running or Absent.
         let before = orb.state().await?;
 
-        match request.operation {
-            Operation::Spawn => spawn(&orb, request, before).await?,
-            Operation::Pause => orb.stop().await?,
-            Operation::Delete => {
+        match &invocation.job {
+            Job::Spawn { config_disk, .. } => spawn(&orb, config_disk, before).await?,
+            Job::Pause { .. } => orb.stop().await?,
+            Job::Delete { .. } => {
                 orb.stop().await?;
                 orb.remove_disk().await?;
             }
@@ -252,17 +251,15 @@ async fn stop_dead_orbs(host: &HostConfig) -> Result<()> {
 /// again with the new one. `state` is the observation converge made under the
 /// same lock, so the VMM is not asked twice.
 #[instrument(skip_all)]
-async fn spawn(orb: &Orb<'_>, request: &Request, state: VmState) -> Result<()> {
-    let config_disk = ConfigDisk::new(request.token.as_ref(), request.amp_url.as_deref())?;
-
-    if state == VmState::Running && orb.config_disk_matches(&config_disk)? {
+async fn spawn(orb: &Orb<'_>, config_disk: &ConfigDisk, state: VmState) -> Result<()> {
+    if state == VmState::Running && orb.config_disk_matches(config_disk)? {
         info!("already running with this config; leaving it alone");
         return Ok(());
     }
 
     orb.stop().await?;
     orb.ensure_disk().await?;
-    orb.start(&config_disk).await
+    orb.start(config_disk).await
 }
 
 /// An environment holding exactly these variables, for tests.

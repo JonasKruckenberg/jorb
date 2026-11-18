@@ -1098,3 +1098,21 @@ splitting them would mean writing each file three times.
   not set"`; `ORB_ID=../x` logs `"ORB_ID: an orb id must start with a letter
   or a digit, and '.' does not"`; `JORB_SLOTS=300` logs `"JORB_SLOTS is 300,
   and a host has between 1 and 256 slots"`. Each exits 1.
+
+### R2. The job is a type that cannot be wrong
+
+Confirmed: `Request` held an operation and an `Option<SecretString>`, and a
+spawn without a token was refused late, inside `ConfigDisk::new`.
+
+- `enum Job { Spawn { orb, config_disk }, Pause { orb }, Delete { orb } }`,
+  parsed once by `Job::from_environment`. The token is turned into the config
+  disk during parsing and not kept. `ConfigDisk::new` takes `&SecretString`.
+- `request.rs` is `job.rs`, so the module and the type have the same name
+  (part of R8's "use job").
+- Behaviour change: an empty `ORB_TOKEN` is refused. Before, it wrote
+  `ORB_TOKEN=` to the config disk, which jorb-init accepts as present.
+- The `op` log field is now Amp's spelling (`spawn`), not the enum's Debug
+  form (`Spawn`). The dashboard groups by it and does not match on values.
+- `grep -rn 'Option<SecretString>' jorb/src`: nothing. Missing and empty
+  tokens are parse errors with their own test, `spawn_without_a_token_is_a_parse_error`.
+- The container check: clean, 28 tests.

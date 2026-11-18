@@ -12,7 +12,7 @@ use tokio::time::sleep;
 
 use crate::constants;
 use crate::host::{self, HostConfig};
-use crate::request::OrbId;
+use crate::job::OrbId;
 
 /// The unit an orb runs as.
 pub fn unit_name(orb: &OrbId) -> String {

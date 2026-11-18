@@ -12,7 +12,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::debug;
 
-use crate::request::OrbId;
+use crate::job::OrbId;
 use crate::{Environment, constants, required};
 
 /// This host as the Nix module describes it: how many orbs it will run, how

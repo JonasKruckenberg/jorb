@@ -21,7 +21,7 @@ use tracing::{debug, info, instrument};
 
 use crate::constants;
 use crate::host::{HostConfig, Slot};
-use crate::request::{ConfigDisk, OrbId};
+use crate::job::{ConfigDisk, OrbId};
 use crate::systemd;
 
 /// One orb on one host. Cheap to make: it is a pair of borrows, and holding
@@ -281,8 +281,8 @@ mod tests {
         let id: OrbId = "amp-1".parse().unwrap();
         let orb = Orb::new(&host, &id);
 
-        let wanted = ConfigDisk::new(Some(&"a-token".into()), None).unwrap();
-        let other = ConfigDisk::new(Some(&"another-token".into()), None).unwrap();
+        let wanted = ConfigDisk::new(&"a-token".into(), None).unwrap();
+        let other = ConfigDisk::new(&"another-token".into(), None).unwrap();
 
         remove_if_present(&orb.config_disk()).unwrap();
         assert!(

@@ -13,48 +13,48 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::{Environment, constants, required};
 
-/// What Amp asked for: an operation, the orb to apply it to, and on spawn the
-/// credential that orb will connect with.
+/// What Amp asked for: an operation on one orb, with what that operation
+/// needs and nothing else. Only a spawn carries a config disk, so a spawn
+/// without a token cannot be represented.
 #[derive(Debug)]
-pub struct Request {
-    pub operation: Operation,
-    pub orb: OrbId,
-
-    /// Present on spawn only, and short-lived: Amp mints it per spawn job.
-    pub token: Option<SecretString>,
-
-    /// A non-default Amp endpoint, when the provider was told to use one.
-    pub amp_url: Option<String>,
+pub enum Job {
+    Spawn { orb: OrbId, config_disk: ConfigDisk },
+    Pause { orb: OrbId },
+    Delete { orb: OrbId },
 }
 
-impl Request {
+impl Job {
     pub fn from_environment(environment: Environment) -> Result<Self> {
-        Ok(Self {
-            operation: required(environment, "ORB_OPERATION")?.parse()?,
-            orb: required(environment, "ORB_ID")?.parse().context("ORB_ID")?,
-            token: environment("ORB_TOKEN")?.map(SecretString::from),
-            amp_url: environment("AMP_URL")?,
-        })
+        let operation = required(environment, "ORB_OPERATION")?;
+        let orb = required(environment, "ORB_ID")?.parse().context("ORB_ID")?;
+
+        match operation.as_str() {
+            "spawn" => {
+                // Amp mints the token per spawn job.
+                let token = environment("ORB_TOKEN")?
+                    .map(SecretString::from)
+                    .context("spawn needs ORB_TOKEN, and this job has none")?;
+                let config_disk = ConfigDisk::new(&token, environment("AMP_URL")?.as_deref())?;
+                Ok(Self::Spawn { orb, config_disk })
+            }
+            "pause" => Ok(Self::Pause { orb }),
+            "delete" => Ok(Self::Delete { orb }),
+            _ => bail!("ORB_OPERATION is {operation:?}, which is not spawn, pause or delete"),
+        }
     }
-}
 
-/// The target state an operation converges on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Operation {
-    Spawn,
-    Pause,
-    Delete,
-}
+    /// The operation's name as Amp spells it, for the `op` log field.
+    pub fn operation(&self) -> &'static str {
+        match self {
+            Self::Spawn { .. } => "spawn",
+            Self::Pause { .. } => "pause",
+            Self::Delete { .. } => "delete",
+        }
+    }
 
-impl FromStr for Operation {
-    type Err = anyhow::Error;
-
-    fn from_str(raw: &str) -> Result<Self> {
-        match raw {
-            "spawn" => Ok(Self::Spawn),
-            "pause" => Ok(Self::Pause),
-            "delete" => Ok(Self::Delete),
-            _ => bail!("ORB_OPERATION is {raw:?}, which is not spawn, pause or delete"),
+    pub fn orb(&self) -> &OrbId {
+        match self {
+            Self::Spawn { orb, .. } | Self::Pause { orb } | Self::Delete { orb } => orb,
         }
     }
 }
@@ -121,8 +121,11 @@ impl ConfigDisk {
     /// one value look like two, the second would end the disk where the
     /// padding starts. The offending value never reaches the message, because
     /// one of the two is the token.
-    pub fn new(token: Option<&SecretString>, amp_url: Option<&str>) -> Result<Self> {
-        let token = token.context("spawn needs ORB_TOKEN, and this job has none")?;
+    pub fn new(token: &SecretString, amp_url: Option<&str>) -> Result<Self> {
+        ensure!(
+            !token.expose_secret().is_empty(),
+            "ORB_TOKEN is empty, so the orb would have nothing to connect with"
+        );
 
         let mut contents = String::new();
         for (key, value) in [
@@ -167,8 +170,8 @@ mod tests {
     use super::*;
     use crate::test_environment;
 
-    fn parse(variables: &[(&str, &str)]) -> Result<Request> {
-        Request::from_environment(&test_environment(variables))
+    fn parse(variables: &[(&str, &str)]) -> Result<Job> {
+        Job::from_environment(&test_environment(variables))
     }
 
     fn refusal(raw: &str) -> String {
@@ -178,7 +181,7 @@ mod tests {
     }
 
     fn config_disk(token: &str, amp_url: Option<&str>) -> Result<ConfigDisk> {
-        ConfigDisk::new(Some(&token.into()), amp_url)
+        ConfigDisk::new(&token.into(), amp_url)
     }
 
     #[test]
@@ -236,15 +239,15 @@ mod tests {
     }
 
     #[test]
-    fn the_token_does_not_appear_in_a_requests_debug_output() {
-        let request = parse(&[
+    fn the_token_does_not_appear_in_a_jobs_debug_output() {
+        let job = parse(&[
             ("ORB_OPERATION", "spawn"),
             ("ORB_ID", "amp-1"),
             ("ORB_TOKEN", "a-token-that-must-not-leak"),
         ])
         .unwrap();
 
-        let printed = format!("{request:?}");
+        let printed = format!("{job:?}");
 
         assert!(
             !printed.contains("a-token-that-must-not-leak"),
@@ -254,11 +257,27 @@ mod tests {
     }
 
     #[test]
-    fn a_request_without_a_token_parses_because_only_spawn_needs_one() {
-        let request = parse(&[("ORB_OPERATION", "delete"), ("ORB_ID", "amp-1")]).unwrap();
+    fn only_spawn_needs_a_token() {
+        for operation in ["pause", "delete"] {
+            let job = parse(&[("ORB_OPERATION", operation), ("ORB_ID", "amp-1")]).unwrap();
+            assert_eq!(job.operation(), operation);
+            assert_eq!(job.orb().to_string(), "amp-1");
+        }
+    }
 
-        assert_eq!(request.operation, Operation::Delete);
-        assert!(request.token.is_none());
+    #[test]
+    fn spawn_without_a_token_is_a_parse_error() {
+        for variables in [
+            &[("ORB_OPERATION", "spawn"), ("ORB_ID", "amp-1")][..],
+            &[
+                ("ORB_OPERATION", "spawn"),
+                ("ORB_ID", "amp-1"),
+                ("ORB_TOKEN", ""),
+            ][..],
+        ] {
+            let refusal = format!("{:#}", parse(variables).expect_err("refused"));
+            assert!(refusal.contains("ORB_TOKEN"), "{refusal}");
+        }
     }
 
     #[test]
@@ -277,15 +296,6 @@ mod tests {
 
         assert!(!String::from_utf8_lossy(without.as_bytes()).contains("AMP_URL"));
         assert!(String::from_utf8_lossy(with.as_bytes()).contains("AMP_URL=https://amp.example\n"));
-    }
-
-    #[test]
-    fn spawn_without_a_token_is_refused() {
-        let refusal = ConfigDisk::new(None, None)
-            .expect_err("a spawn without a token has nothing to write")
-            .to_string();
-
-        assert!(refusal.contains("ORB_TOKEN"), "{refusal}");
     }
 
     #[test]
