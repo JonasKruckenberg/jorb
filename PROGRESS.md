@@ -71,8 +71,9 @@ sudo -E tests/host/matrix.sh 4            # just the network policy, say
 **The review's other host checks**, after the module is switched in:
 
 ```sh
-sudo -u jorb sudo -n FOO=1 "$(readlink -f /run/current-system/sw/bin/jorb-root 2>/dev/null || echo <jorb-root store path>)"  # C1: must be refused
-sudo -u jorb env ORB_OPERATION=pause ORB_ID=review-c2 <jorb-dispatch store path>                                       # C2: must exit 0
+# The store paths are in /etc/sudoers and in jorb-provider.service's ExecStart.
+sudo -u jorb sudo -n FOO=1 <jorb-root>                                 # C1: must be refused
+sudo -u jorb env ORB_OPERATION=pause ORB_ID=review-c2 <jorb-dispatch>  # C2: must exit 0
 ```
 
 Then reboot a host with no base image and check the provider ends active
