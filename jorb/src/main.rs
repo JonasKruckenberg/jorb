@@ -138,7 +138,7 @@ async fn run(job: &Job, settings: &Settings) -> Result<Transition> {
 }
 
 /// The host's one lock, held for the whole job, so no two jobs interleave.
-/// The wait is bounded so a job behind a stuck one fails and Amp retries.
+/// The wait is bounded so the job as a whole stays inside Amp's timeout.
 async fn take_lock(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .create(true)

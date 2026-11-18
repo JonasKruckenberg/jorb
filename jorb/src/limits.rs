@@ -25,17 +25,20 @@ pub const DEFAULT_MEMORY_MIB: NonZeroU32 = NonZeroU32::new(6144).unwrap();
 /// How long Amp allows one job before it gives up and retries.
 pub const AMP_JOB_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// How long the whole job may take. jorb has to fail before Amp gives up: a
-/// job still running when Amp retries would be a second job against the same
-/// orb.
-pub const JOB_DEADLINE: Duration = Duration::from_secs(240);
-
-const _: () = assert!(JOB_DEADLINE.as_secs() < AMP_JOB_TIMEOUT.as_secs());
-
 /// How long to wait for another job to let go of the lock, and how often to
-/// try.
-pub const LOCK_WAIT: Duration = Duration::from_secs(60);
+/// try. A healthy holder may run for the whole job deadline, so giving up
+/// here does not mean the holder is stuck: it means this job would not finish
+/// in time, and Amp should retry it later.
+pub const LOCK_WAIT: Duration = Duration::from_secs(50);
 pub const LOCK_POLL: Duration = Duration::from_millis(200);
+
+/// How long the job may take once it holds the lock.
+pub const JOB_DEADLINE: Duration = Duration::from_secs(230);
+
+// jorb has to fail before Amp gives up: a job still running when Amp retries
+// would be a second job against the same orb. The lock wait comes first and
+// the deadline after it, so their sum is the longest a job can run.
+const _: () = assert!(LOCK_WAIT.as_secs() + JOB_DEADLINE.as_secs() < AMP_JOB_TIMEOUT.as_secs());
 
 /// How long to wait for Cloud Hypervisor to open its API socket, and how often
 /// to look. It takes milliseconds on a host that is not thrashing; ten seconds

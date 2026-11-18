@@ -51,8 +51,8 @@ sections_run=0
 # unit to start at all.
 boot_deadline=${JORB_MATRIX_BOOT_DEADLINE:-90}
 no_socket_deadline=${JORB_MATRIX_NO_SOCKET_DEADLINE:-40}
-# jorb's JOB_DEADLINE.
-job_deadline=240
+# jorb's LOCK_WAIT plus JOB_DEADLINE, the longest a job can run.
+job_deadline=280
 
 # ---------------------------------------------------------------- the harness
 

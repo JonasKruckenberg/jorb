@@ -1271,3 +1271,19 @@ it.
   the freed slot. shellcheck clean. `[host]` awaiting a run.
 - The container check: clean, 29 tests. Nothing here is a pure function
   that a unit test could reach without systemd.
+
+### B2. The job deadline did not cover the lock wait
+
+Confirmed: `LOCK_WAIT` 60 s plus `JOB_DEADLINE` 240 s is Amp's 300 s, the
+compile-time assertion checked only the deadline, and the comment's premise
+(a lock held past the wait belongs to a stuck job) was false, since a healthy
+holder may run 240 s.
+
+- `LOCK_WAIT` is 50 s and `JOB_DEADLINE` 230 s, and the assertion is over
+  the sum: `LOCK_WAIT + JOB_DEADLINE < AMP_JOB_TIMEOUT` (280 < 300). The 20 s
+  left covers process start and exit. The comment now says what giving up on
+  the lock means.
+- With `LOCK_WAIT` set to 70 s the crate fails to compile:
+  `evaluation panicked: assertion failed: LOCK_WAIT.as_secs() + JOB_DEADLINE.as_secs() < AMP_JOB_TIMEOUT.as_secs()`.
+  Restored to 50 s, the container check is clean.
+- Matrix section 8 uses 280 s as its bound.
