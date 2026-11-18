@@ -18,6 +18,7 @@ use tokio::time::sleep;
 use crate::disk;
 use crate::job::OrbId;
 use crate::limits;
+use crate::program::run;
 use crate::settings::Settings;
 
 /// Taps are `jorb<S>`.
@@ -33,6 +34,13 @@ const GUEST_NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 252);
 const CONSOLE_DEVICE: &str = "ttyAMA0";
 const GUEST_INIT: &str = "/jorb-init";
 const GUEST_INTERFACE: &str = "eth0";
+
+/// The nftables table that holds the network policy, from the Nix module.
+const POLICY_FAMILY: &str = "inet";
+const POLICY_TABLE: &str = "jorb";
+
+/// By name, so the PATH the wrapper sets decides which nft this is.
+const NFT: &str = "nft";
 
 /// Public resolvers, because orbs may not talk to anything on the host's
 /// network, its resolver included.
@@ -100,6 +108,21 @@ pub fn vmm_command(settings: &Settings, orb: &OrbId) -> Vec<String> {
         settings.cloud_hypervisor.to_string_lossy().into_owned(),
         format!("--api-socket={}", api_socket_path(settings, orb).display()),
     ]
+}
+
+/// Fails unless the network policy's table is loaded. The policy only
+/// forbids, so without its table an orb would reach the host and the LAN, and
+/// nothing else would notice.
+pub async fn ensure_network_policy() -> Result<()> {
+    run(NFT, &["list", "table", POLICY_FAMILY, POLICY_TABLE])
+        .await
+        .with_context(|| {
+            format!(
+                "the network policy table {POLICY_FAMILY} {POLICY_TABLE} is not loaded, \
+                 so an orb would not be confined to the internet"
+            )
+        })?;
+    Ok(())
 }
 
 /// What the VMM behind the orb's socket says about it.

@@ -35,7 +35,10 @@ let
   # The host as jorb is told about it, and the only programs jorb runs. The
   # VMM is an absolute store path so nothing on the caller's side picks it.
   hostEnvironment = {
-    PATH = lib.makeBinPath [ config.systemd.package ];
+    PATH = lib.makeBinPath [
+      config.systemd.package
+      pkgs.nftables
+    ];
     JORB_CH_BIN = "${cfg.cloudHypervisorPackage}/bin/cloud-hypervisor";
     JORB_SLOTS = toString cfg.slots;
     JORB_VCPUS = toString cfg.vcpus;

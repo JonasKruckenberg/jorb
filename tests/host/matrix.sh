@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # T11: what jorb does, checked against what the plan says it should do.
 #
-# Nine sections, each printing its own PASS or FAIL line plus evidence, and
+# Ten sections, each printing its own PASS or FAIL line plus evidence, and
 # one summary line at the end. Everything runs against the busybox test image
 # with a dummy token: no Amp, no real orb, no test hooks in jorb itself.
 #
 # Usage: sudo -E tests/host/matrix.sh [section...]
-#   with no arguments it runs all nine.
+#   with no arguments it runs all ten.
 
 # The sections are dispatched by name, which hides every call from here.
 # shellcheck disable=SC2329
@@ -68,6 +68,12 @@ setup() {
 	image=$(built "${JORB_TEST_IMAGE_FLAKE:-.#test-image}")/test.raw
 	if [ -z "$jorb" ]; then
 		jorb=$(built "${JORB_FLAKE:-.#jorb}")/bin/jorb
+	fi
+
+	# jorb refuses to start an orb without the network policy's table, so
+	# without the module no spawn in any section can succeed.
+	if ! module_installed; then
+		fail "the inet jorb nftables table is not loaded; install the module first"
 	fi
 
 	evidence "jorb     $jorb"
@@ -749,13 +755,45 @@ section_9() {
 	finish_section 9 "an orb whose bootstrap exits powers off and its unit stops"
 }
 
+# ------------------------------------------ 10. no policy, no orb
+
+section_10() {
+	section 10 "without the network policy's table, spawn refuses and starts nothing"
+
+	wipe_everything
+	mkdir -p "$JORB_STATE_DIR/disks" "$JORB_RUN_DIR"
+
+	local orb=m10 status=0
+
+	# The table comes back from the module's ruleset at the end of the
+	# section, whatever happened in it.
+	nft delete table inet jorb || note "could not delete the table"
+	job spawn "$orb" "$token" || status=$?
+	systemctl restart nftables.service || note "could not restore the ruleset"
+	module_installed || note "the table did not come back; the host is unconfined"
+
+	evidence "spawn without the table exited $status"
+	[ "$status" -ne 0 ] || note "spawn succeeded without the network policy"
+	if ! tail -n 5 "$work/jorb.log" | grep -q 'inet jorb is not loaded'; then
+		note "the failure did not name the table"
+	fi
+	if systemctl is-active --quiet "$(unit_of "$orb")"; then
+		note "a unit was started anyway"
+	fi
+
+	job delete "$orb" || note "the cleanup delete failed"
+	wipe_everything
+	expect_no_debris || note "something was left behind"
+	finish_section 10 "without the network policy's table, spawn refuses and starts nothing"
+}
+
 # ------------------------------------------------------------------ the whole
 
 setup
 
 requested=("$@")
 if [ "${#requested[@]}" -eq 0 ]; then
-	requested=(1 2 3 4 5 6 7 8 9)
+	requested=(1 2 3 4 5 6 7 8 9 10)
 fi
 
 for number in "${requested[@]}"; do

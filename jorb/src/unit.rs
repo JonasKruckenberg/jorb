@@ -1,5 +1,5 @@
-//! systemd: what an orb's unit is called, how to start and stop one, which
-//! ones exist, and how jorb runs a program at all.
+//! systemd: what an orb's unit is called, how to start and stop one, and
+//! which ones exist.
 //!
 //! The `jorb-orb-` prefix is the whole reason recover is safe: no other unit
 //! on the host, the provider's own included, can be read as an orb's. What
@@ -8,12 +8,11 @@
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
-use tokio::process::Command;
-use tokio::time::{sleep, timeout};
-use tracing::debug;
+use tokio::time::sleep;
 
 use crate::job::OrbId;
 use crate::limits;
+use crate::program::run;
 
 const UNIT_PREFIX: &str = "jorb-orb-";
 const UNIT_SUFFIX: &str = ".service";
@@ -128,40 +127,6 @@ async fn is_active(unit: &str) -> Result<bool> {
         state.trim(),
         "active" | "activating" | "deactivating" | "reloading"
     ))
-}
-
-/// Runs a program and gives back its stdout, failing if it does. Arguments
-/// are passed as arguments: nothing jorb runs goes through a shell, because
-/// `ORB_ID` reaches some of them. The child never sees the token, and one
-/// that outlives the timeout is killed.
-pub async fn run(program: &str, arguments: &[&str]) -> Result<String> {
-    debug!(program, ?arguments, "running");
-
-    let output = timeout(
-        limits::SUBPROCESS_TIMEOUT,
-        Command::new(program)
-            .args(arguments)
-            .env_remove("ORB_TOKEN")
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .with_context(|| {
-        format!(
-            "{program} did not finish within {:?}",
-            limits::SUBPROCESS_TIMEOUT
-        )
-    })?
-    .with_context(|| format!("running {program}"))?;
-
-    ensure!(
-        output.status.success(),
-        "{program} exited with {}: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[cfg(test)]

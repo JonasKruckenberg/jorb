@@ -9,6 +9,7 @@ mod disk;
 mod job;
 mod limits;
 mod operations;
+mod program;
 mod settings;
 mod unit;
 mod vm;

@@ -183,10 +183,13 @@ fn remove_disk(settings: &Settings, orb: &OrbId) -> Result<()> {
     Ok(())
 }
 
-/// Starts the orb: config disk, slot, unit, VM. Nothing is undone if any of
-/// this fails; the unit, socket and tap left behind are recover's.
+/// Starts the orb: network policy, config disk, slot, unit, VM. Nothing is
+/// undone if any of this fails; the unit, socket and tap left behind are
+/// recover's.
 #[instrument(skip_all, fields(orb = %orb, slot = tracing::field::Empty))]
 async fn start(settings: &Settings, orb: &OrbId, config_disk: &ConfigDisk) -> Result<()> {
+    vm::ensure_network_policy().await?;
+
     disk::remove_if_present(&vm::api_socket_path(settings, orb))?;
     disk::write_config_disk(&disk::config_disk_path(settings, orb), config_disk)?;
 

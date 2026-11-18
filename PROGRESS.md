@@ -1362,3 +1362,24 @@ Confirmed all three.
   any other error fails. A unit test covers no file, a listener, and a file
   left after the listener closed.
 - The container check: clean, 31 tests.
+
+### N1. The network policy failed open
+
+Confirmed: the policy lives entirely in the module's `inet jorb` table, which
+only drops, and nothing in jorb looked for it. Without the table an orb
+reaches the host and the LAN.
+
+- `start` runs `nft list table inet jorb` before it writes the config disk or
+  starts a unit, and fails with "the network policy table inet jorb is not
+  loaded, so an orb would not be confined to the internet". The wrapper's
+  `PATH` now holds nftables as well as systemd.
+- `run` moved out of `unit.rs` into `program.rs`, since `vm.rs` now runs a
+  program too. That is the one module beyond R1's table, and it exists to
+  keep one way of running a program.
+- Consequence for the matrix: every section spawns, so every section now
+  needs the module's table. `setup` fails early with that message rather
+  than letting each section fail on its own.
+- New matrix section 10: delete the table, spawn, restore the ruleset with
+  `systemctl restart nftables.service`, then require a non-zero exit, the
+  table named in the log, and no unit. `[host]` awaiting a run.
+- The container check: clean. shellcheck and nixfmt clean.
