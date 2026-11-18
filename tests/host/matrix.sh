@@ -745,7 +745,7 @@ section_9() {
 	wipe_everything
 	mkdir -p "$JORB_STATE_DIR/disks" "$JORB_RUN_DIR"
 
-	local orb=m9 invocation log exits errors waited=0 stopped= started
+	local orb=m9 invocation log exits errors waited=0 stopped='' started
 
 	started=$(date +%s)
 	job spawn "$orb" "$token-exit-bootstrap" || note "the spawn failed"
