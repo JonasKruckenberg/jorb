@@ -72,11 +72,11 @@ let
   # What `amp orb provider` runs, as the unprivileged provider user.
   dispatch = pkgs.writeShellApplication {
     name = "jorb-dispatch";
-    runtimeInputs = [ pkgs.sudo ];
     text = ''
-      # -n so a missing sudo rule fails rather than waits for a password that
-      # no one is there to type.
-      exec sudo -n ${rootSide}/bin/jorb-root
+      # The setuid wrapper: the store's sudo has no setuid bit. -n so a
+      # missing sudo rule fails rather than waits for a password that no one
+      # is there to type.
+      exec ${config.security.wrapperDir}/sudo -n ${rootSide}/bin/jorb-root
     '';
   };
 in
@@ -331,7 +331,6 @@ in
           RestartSec = 5;
         };
 
-        path = [ pkgs.sudo ];
       };
 
       systemd.slices.jorb = {

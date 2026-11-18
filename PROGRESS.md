@@ -1045,3 +1045,15 @@ and that variable chose the program `systemd-run` started as root. With
   `ORB_ID`, `ORB_TOKEN`, the exported settings and bash's own `SHLVL`.
 - `[host]` `sudo -u jorb sudo -n FOO=1 <jorb-root>` is refused: awaiting a
   host run.
+
+### C2. The dispatch ran a sudo that is not setuid
+
+Confirmed: `jorb-dispatch` had `pkgs.sudo` first on its `PATH`, and the
+provider unit's `path` held it too. The store copy has no setuid bit.
+
+- `jorb-dispatch` runs `${config.security.wrapperDir}/sudo -n …` by absolute
+  path; `pkgs.sudo` is gone from its `runtimeInputs` and from the unit's
+  `path`. The evaluated provider unit's `Environment=PATH` no longer names a
+  sudo package.
+- `[host]` `sudo -u jorb env ORB_OPERATION=pause ORB_ID=review-c2 <jorb-dispatch>`
+  exits 0: awaiting a host run.
