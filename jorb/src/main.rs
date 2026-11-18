@@ -8,9 +8,7 @@
 
 mod constants;
 mod host;
-mod init;
 mod orb;
-mod preflight;
 mod request;
 mod systemd;
 
@@ -45,69 +43,25 @@ struct Invocation {
     host: HostConfig,
 }
 
-/// `jorb preflight`. Everything it needs comes from `JORB_*`, so it takes no
-/// arguments of its own.
-#[derive(Debug, Parser)]
-#[command(
-    name = "jorb preflight",
-    about = "Reports whether this host can run orbs"
-)]
-struct PreflightCommand {
-    #[command(flatten)]
-    host: HostConfig,
-}
-
-/// `jorb init`.
-#[derive(Debug, Parser)]
-#[command(name = "jorb init", about = "Makes this host ready to run orbs")]
-struct InitCommand {
-    /// Create and mount an XFS image for the state directory, when the
-    /// filesystem it is on cannot reflink. Off by default: it is a
-    /// persistent change to the machine.
-    #[arg(long)]
-    create_state_image: bool,
-
-    /// Where that image goes.
-    #[arg(long, default_value = constants::STATE_IMAGE)]
-    state_image: std::path::PathBuf,
-
-    /// How big it claims to be. It is sparse, so this is not what it costs.
-    #[arg(long, default_value_t = constants::STATE_IMAGE_GIB)]
-    state_image_gib: u32,
-
-    #[command(flatten)]
-    host: HostConfig,
-}
-
 /// Exit 0 means the operation's postcondition was observed. Anything else
 /// means it was not, and tells Amp to retry the job.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    // The provider calls jorb with no arguments and the job in the
-    // environment; a person calls it with a command. Choosing here keeps the
-    // job's arguments required for a job and out of a command's way. clap's
-    // `subcommand_negates_reqs` does not relax requirements that come from a
-    // flattened group, which is all of ours, and the flag that would have to
-    // join it treats the `JORB_*` already in a unit's environment as a
-    // conflict.
-    let arguments: Vec<String> = std::env::args().collect();
-    let command = arguments.get(1).cloned();
-
-    // A job explains itself to the dashboards, so it logs everything. A
-    // command explains itself to whoever ran it, in the report it prints, so
-    // the only events worth having are the ones that went wrong.
     tracing_subscriber::fmt()
         .json()
-        .with_max_level(if command.is_some() {
-            Level::WARN
-        } else {
-            Level::DEBUG
-        })
+        .with_max_level(Level::DEBUG)
         .with_writer(std::io::stderr)
         .init();
 
-    if let Some(command) = command {
-        return run_command(&command, &arguments[2..]).await;
+    // Amp passes the job in the environment and nothing on the command line,
+    // so an argument means something other than Amp is calling.
+    if let Some(argument) = std::env::args_os().nth(1) {
+        error!(
+            outcome = "rejected",
+            argument = %argument.to_string_lossy(),
+            "jorb takes no arguments: the job is in the environment"
+        );
+        return ExitCode::FAILURE;
     }
 
     let invocation = match Invocation::try_parse() {
@@ -148,64 +102,6 @@ async fn main() -> ExitCode {
             );
             ExitCode::FAILURE
         }
-    }
-}
-
-/// The commands for whoever installs jorb, as against the provider's job.
-///
-/// Each parses the rest of the command line itself, so each gets clap's own
-/// help and its own refusals.
-async fn run_command(command: &str, arguments: &[String]) -> ExitCode {
-    let argv = || std::iter::once(format!("jorb {command}")).chain(arguments.iter().cloned());
-
-    let outcome = match command {
-        "preflight" => match PreflightCommand::try_parse_from(argv()) {
-            Ok(parsed) => preflight::preflight(&parsed.host).await,
-            Err(error) => return reject(error),
-        },
-        "init" => match InitCommand::try_parse_from(argv()) {
-            Ok(parsed) => {
-                let image = parsed.create_state_image.then_some(init::StateImage {
-                    path: parsed.state_image,
-                    gib: parsed.state_image_gib,
-                });
-                init::init(&parsed.host, image.as_ref()).await
-            }
-            Err(error) => return reject(error),
-        },
-        _ => {
-            error!(
-                command,
-                "jorb runs one job from the environment, or the commands `preflight` and `init`"
-            );
-            return ExitCode::FAILURE;
-        }
-    };
-
-    match outcome {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::FAILURE,
-        Err(error) => {
-            error!(error = format!("{error:#}"), "the command could not finish");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-/// clap's own message, as clap formats it.
-///
-/// A command is run by a person, so its output is for a terminal rather than
-/// for the dashboards: `--help` arrives here as an error and is not a failure,
-/// and a real mistake reads better as clap's own paragraph than as one field
-/// of a JSON event.
-fn reject(error: clap::Error) -> ExitCode {
-    let failed = error.use_stderr();
-    let _ = error.print();
-
-    if failed {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
     }
 }
 

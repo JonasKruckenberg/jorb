@@ -77,11 +77,6 @@ impl HostConfig {
         &self.run_dir
     }
 
-    /// Where the base image and the orbs' disks live.
-    pub fn state_directory(&self) -> &Path {
-        &self.state_dir
-    }
-
     /// How many slots this host has: what it was configured for, bounded by
     /// what a slot's addressing can express.
     pub fn slot_count(&self) -> u16 {

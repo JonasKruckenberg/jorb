@@ -947,7 +947,7 @@ here has no Linux builder. So:
   checks passed", but it omits `aarch64-linux`, so it builds none of the
   checks. That pass is not evidence and is not recorded as one.
 - fmt, clippy and the test suite ran in an aarch64 Linux container
-  (`rust:latest`, cargo 1.91 or later) with the workspace mounted and
+  (`rust:latest`, cargo 1.100.0, the same version as the flake's toolchain) with the workspace mounted and
   `CH_OPENAPI_SPEC` pointed at the spec from the same `cloud-hypervisor.src`
   the flake uses. That is called "the container check" below.
 - Nix evaluation of the module (`nix eval` of the check's `drvPath`, which
@@ -963,3 +963,18 @@ here has no Linux builder. So:
 - `[host]` matrix sections 1, 2, 3 and 6: awaiting a host run. The review asks
   for these before and after phase 3; neither run happened in this session,
   so phase 3 went ahead on unit tests and evaluation alone.
+
+### S1. Remove the installer from the job binary
+
+Confirmed: `jorb/src/main.rs` chose between a job and the `preflight` and
+`init` commands, with two logging levels and two `allow(clippy::print_stdout)`
+attributes. Deleted `init.rs`, `preflight.rs`, the dispatch and the fourteen
+constants only they used. `jorb` now refuses any argument.
+
+- `jorb anything` in the container: one event,
+  `{"level":"ERROR","fields":{"message":"jorb takes no arguments: the job is in the environment","outcome":"rejected","argument":"anything"}}`,
+  exit 1.
+- `grep -rn 'println\|print_stdout' jorb/src`: nothing.
+- The container check: fmt and clippy clean, 27 tests pass. Neither deleted
+  module had tests.
+- AGENTS.md's Contract bullet about commands is rewritten to match.

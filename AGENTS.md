@@ -18,7 +18,7 @@ When two conflict, the earlier wins. v1 is deliberately minimal. A feature that 
 Source of truth: https://ampcode.com/docs/orbs/self-hosted. Re-read it when in doubt rather than relying on memory.
 
 - Input is environment variables only: `ORB_OPERATION` (`spawn` | `pause` | `delete`), `ORB_ID`, and on spawn `ORB_TOKEN` and optionally `AMP_URL`.
-- Amp always calls jorb with no arguments, so the first argument is free for the commands a person runs when installing it: `jorb preflight` reports whether this host can run orbs, and `jorb init` makes it ready. A command is chosen before clap, because clap cannot relax requirements that come from a flattened group. A job logs for the dashboards; a command reports to whoever ran it and logs only failures.
+- Amp always calls jorb with no arguments, and jorb takes none: any argument is an error, reported as one JSON event. Making a host ready is the Nix module's job, declaratively; the `jorb` binary runs jobs and nothing else.
 - v1 ignores `ORB_IMAGE`, `ORB_SNAPSHOT_ID` and `ORB_TYPE`. Log that once at debug level.
 - Every operation must be safe to repeat and must finish within five minutes.
 - Exit 0 if and only if the operation's postcondition was observed.

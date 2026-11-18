@@ -132,52 +132,6 @@ pub const LOCK_POLL: Duration = Duration::from_millis(200);
 /// Where the kernel lists interfaces. A slot is taken when its tap is here.
 pub const SYS_CLASS_NET: &str = "/sys/class/net";
 
-/// What preflight looks at to answer whether this host can hold an orb at
-/// all: the hypervisor interface a microVM needs, the cgroup v2 root the
-/// slice's `MemoryHigh` lives under, and where the kernel reports free
-/// memory.
-pub const KVM_DEVICE: &str = "/dev/kvm";
-pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
-pub const MEMINFO: &str = "/proc/meminfo";
-
-/// Where the kernel lists what is mounted where. Preflight reads it to name
-/// the filesystem under a path.
-pub const MOUNTS: &str = "/proc/mounts";
-
-/// What systemd leaves behind when it is the host's init. `sd_booted` asks
-/// the same question.
-pub const SYSTEMD_RUNTIME: &str = "/run/systemd/system";
-
-/// How a command that needs root asks whether it could have it.
-pub const SUDO: &str = "sudo";
-
-/// The mode of every directory jorb owns. A config disk under the run
-/// directory holds a token, so nothing here is anyone else's to read.
-pub const STATE_DIRECTORY_MODE: u32 = 0o700;
-
-/// What init measures a state image in, and the size it makes one by default.
-///
-/// The image is sparse, so this is what the filesystem believes it has rather
-/// than what it costs. 128 GiB holds the 64 GiB base image and the reflink
-/// clones of it that the orbs write into.
-pub const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
-pub const STATE_IMAGE_GIB: u32 = 128;
-
-/// Where init puts that image, next to the directory it mounts it on.
-pub const STATE_IMAGE: &str = "/var/lib/jorb.img";
-
-/// The three programs init runs, by name, so the PATH it was given decides
-/// which ones. jorb-prepare-image is this project's own.
-pub const MKFS_XFS: &str = "mkfs.xfs";
-pub const STATE_LABEL: &str = "jorb";
-pub const MOUNT: &str = "mount";
-pub const PREPARE_IMAGE: &str = "jorb-prepare-image";
-
-/// The two names preflight clones between to find out whether the state
-/// directory can clone. Both are removed again whatever the answer.
-pub const CLONE_PROBE_SOURCE: &str = ".clone-probe";
-pub const CLONE_PROBE_CLONE: &str = ".clone-probe-clone";
-
 /// The two systemd commands jorb runs, by name, so the unit's PATH decides
 /// which systemd it is talking to.
 pub const SYSTEMCTL: &str = "systemctl";
