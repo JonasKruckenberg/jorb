@@ -4,15 +4,15 @@
 //! The state directory holds the base image, the lock and `disks/<id>.raw`;
 //! the run directory, a tmpfs, holds each orb's config disk and API socket.
 
-use std::collections::HashMap;
 use std::num::{NonZeroU8, NonZeroU32};
 use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{Context, Result, ensure};
 
+use crate::limits;
 use crate::request::OrbId;
-use crate::{limits, required};
+use crate::variables::Variables;
 
 #[derive(Debug)]
 pub struct Settings {
@@ -27,7 +27,7 @@ pub struct Settings {
 }
 
 impl Settings {
-    pub fn parse(variables: &HashMap<String, String>) -> Result<Self> {
+    pub fn parse(variables: &Variables) -> Result<Self> {
         let settings = Self {
             slots: parsed(variables, "JORB_SLOTS")?,
             vcpus: parsed(variables, "JORB_VCPUS")?,
@@ -77,12 +77,12 @@ impl Settings {
     }
 }
 
-fn parsed<T>(variables: &HashMap<String, String>, name: &str) -> Result<T>
+fn parsed<T>(variables: &Variables, name: &str) -> Result<T>
 where
     T: FromStr,
     T::Err: std::error::Error + Send + Sync + 'static,
 {
-    let raw = required(variables, name)?;
+    let raw = variables.required(name)?;
     raw.parse().with_context(|| format!("{name} is {raw:?}"))
 }
 
@@ -92,7 +92,7 @@ mod tests {
 
     #[test]
     fn every_setting_is_required_and_checked() {
-        assert!(Settings::parse(&crate::test_variables(&[])).is_err());
+        assert!(Settings::parse(&Variables::of(&[])).is_err());
 
         for (name, value) in [
             ("JORB_SLOTS", "0"),
@@ -111,7 +111,7 @@ mod tests {
             variables.retain(|(existing, _)| *existing != name);
             variables.push((name, value));
             assert!(
-                Settings::parse(&crate::test_variables(&variables)).is_err(),
+                Settings::parse(&Variables::of(&variables)).is_err(),
                 "{name}={value}"
             );
         }

@@ -22,7 +22,7 @@ use tracing::{error, info};
 const CONFIG_DISK: &str = "/dev/vdb";
 /// The image's own environment, written by jorb-prepare-image.
 const IMAGE_ENVIRONMENT: &str = "/etc/jorb-env";
-/// Pause is a power cut, so dirty pages wait a second, not thirty.
+/// One second, in the kernel's unit.
 const DIRTY_CENTISECS: &str = "100";
 const DEV_SHM_OPTIONS: &CStr = c"size=1G";
 const USER: &str = "user";
@@ -46,9 +46,10 @@ fn main() -> ! {
 }
 
 fn start_bootstrap() -> Result<u32> {
-    // ===== Filesystems: what a userspace expects beyond the kernel's devtmpfs =====
-
-    // devpts keeps device nodes, so a pty can be opened by its path.
+    // ===== Mounting the kernel's filesystems, so that every later stage can
+    // read /proc and bootstrap finds the userspace it expects. First, because
+    // everything below reads /proc. devpts keeps device nodes, so a pty can
+    // be opened by its path.
     let ordinary = MountFlags::NOSUID | MountFlags::NODEV;
     for (filesystem, target, flags, options) in [
         ("proc", "/proc", ordinary, None),
@@ -62,7 +63,9 @@ fn start_bootstrap() -> Result<u32> {
             .with_context(|| format!("mounting {target}"))?;
     }
 
-    // devtmpfs does not create these, and `<(...)` and `> /dev/stderr` need them.
+    // ===== Linking /dev/fd and the standard streams, so that shell constructs
+    // like `<(...)` and `> /dev/stderr` work. devtmpfs does not create them;
+    // they point into /proc, so this comes after mounting it.
     for (link, target) in [
         ("/dev/fd", "/proc/self/fd"),
         ("/dev/stdin", "/proc/self/fd/0"),
@@ -72,24 +75,27 @@ fn start_bootstrap() -> Result<u32> {
         symlink(target, link).with_context(|| format!("linking {link}"))?;
     }
 
-    // ===== Writeback: pause is a power cut, so flush within a second =====
-
+    // ===== Shortening the writeback window, so that a pause loses at most a
+    // second of the orb's writes. Pause is a power cut: the kernel would
+    // otherwise hold dirty pages for thirty seconds before writing them.
+    // Needs /proc/sys.
     for knob in ["dirty_expire_centisecs", "dirty_writeback_centisecs"] {
         fs::write(format!("/proc/sys/vm/{knob}"), DIRTY_CENTISECS)?;
     }
 
-    // ===== Names: resolvers and the orb's own hostname =====
-
-    // The kernel's `ip=` leaves the resolvers in resolv.conf's own format, and
-    // sets the hostname to the orb id, which DNS cannot answer for.
-    // Read, not fs::copy: procfs reports a size of 0.
+    // ===== Writing resolv.conf and /etc/hosts, so that the orb resolves
+    // names and its own hostname. The kernel's `ip=` left the resolvers in
+    // /proc/net/pnp, in resolv.conf's format, and set the hostname to the orb
+    // id, which DNS cannot answer for. Needs /proc; read rather than
+    // fs::copy, because procfs reports a size of 0.
     fs::write("/etc/resolv.conf", fs::read("/proc/net/pnp")?)
         .context("writing /etc/resolv.conf")?;
     let hostname = fs::read_to_string("/proc/sys/kernel/hostname")?;
     fs::write("/etc/hosts", hosts(hostname.trim())).context("writing /etc/hosts")?;
 
-    // ===== Bootstrap: the image's environment plus the config disk, as `user` =====
-
+    // ===== Starting bootstrap as `user`, so that the orb connects to Amp.
+    // Last, because it relies on everything above: the image's environment,
+    // then the config disk's token and endpoint.
     let config_disk =
         ConfigDisk::read_from(fs::File::open(CONFIG_DISK)?).context("reading the config disk")?;
     let environment = environment(&fs::read_to_string(IMAGE_ENVIRONMENT)?, &config_disk);

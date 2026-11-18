@@ -24,13 +24,13 @@ Source of truth: https://ampcode.com/docs/orbs/self-hosted. Re-read it rather th
 
 ## Model
 
-An orb is two facts: *disk exists* and *VM running*. "Running without disk" is unreachable: create the disk before starting, stop before unlinking. Every request takes one global lock (`File::lock` on `/var/lib/jorb/lock`), runs `recover`, then its operation:
+An orb is two facts: *disk exists* and *VM running*. "Running without disk" is unreachable: create the disk before booting, power off before unlinking. Every request takes one global lock (`File::lock` on `/var/lib/jorb/lock`), clears dead orbs, then applies its operation:
 
 | Operation | Composition |
 |---|---|
-| pause | `stop` |
-| delete | `stop`, `remove_disk` |
-| spawn | nothing if running with an equal config disk; otherwise `stop`, `ensure_disk`, `start` |
+| pause | `power_off` |
+| delete | `power_off`, remove the disk |
+| spawn | nothing if running with an equal config disk; otherwise `power_off`, `ensure_disk`, `boot` |
 
 Each primitive establishes its own preconditions (truncate `disks/.tmp`, remove a stale socket, overwrite the config disk) and observes its postcondition: systemd's answer, the VMM's, a file. Never another tool's exit code.
 
@@ -39,7 +39,7 @@ Each primitive establishes its own preconditions (truncate `disks/.tmp`, remove 
 jorb is crash-only: the start path is the recovery path.
 
 - Any previous request may have died at any instruction; `kill -9`, a power cut and an error all leave something the next request handles the same way.
-- `recover` stops every `jorb-orb-*` unit whose VM it cannot confirm running, whosever it is. Under the lock no request is mid-start, so such a unit is debris or a VMM that stopped answering, and it holds a slot.
+- Clearing dead orbs powers off every `jorb-orb-*` unit whose VM is not confirmed running, whosever it is, and removes config disks and sockets no running orb owns. Under the lock no request is mid-boot, so such a unit is debris or a VMM that stopped answering, and it holds a slot.
 - No cleanup on the way out: none in error branches, no `Drop` for external state, no signal handlers. A kill skips them anyway.
 - Fail early and loudly: one error event with the evidence, non-zero exit. No retries, fallbacks or silent repair. An observed invariant violation is a bug to report, not to paper over. Errors, not `panic!`.
 - A healthy orb is left alone. Orb units have no `Restart=`; only the provider restarts itself.
@@ -61,7 +61,7 @@ Changing anything here is a design change. Propose it first.
 | `/run/jorb/<id>.cfg` | config disk, mode 0600, present only while the orb runs |
 | `/run/jorb/<id>.sock` | Cloud Hypervisor API socket |
 
-**Units** are `jorb-orb-<id>.service` in `jorb.slice`, started with `systemd-run --collect`. The prefix is what keeps every other unit, the provider's included, out of `recover`'s reach.
+**Units** are `jorb-orb-<id>.service` in `jorb.slice`, started with `systemd-run --collect`. The prefix is what keeps every other unit, the provider's included, out of reach of clearing dead orbs.
 
 **Slots.** `S` in `0..JORB_SLOTS`, at most 256: tap `jorb<S>`, host `10.77.S.1/30`, guest `10.77.S.2`. A slot is free when its tap is absent; no free slot is the capacity error.
 
@@ -85,13 +85,13 @@ Changing anything here is a design change. Propose it first.
 
 jorb knows nothing about the guest and jorb-init nothing about Amp; the config disk is the whole interface.
 
-**Network policy.** Orbs are internet-only: nothing they send reaches the host or a private, link-local, CGNAT, loopback or multicast range; IPv6 is dropped; a tap may send only from its slot's guest address; nothing reaches a tap that the orb did not ask for. The policy is the `inet jorb` table in the Nix module. It only drops, so `start` refuses to run without it.
+**Network policy.** Orbs are internet-only: nothing they send reaches the host or a private, link-local, CGNAT, loopback or multicast range; IPv6 is dropped; a tap may send only from its slot's guest address; nothing reaches a tap that the orb did not ask for. The policy is the `inet jorb` table in the Nix module. It only drops, so `vm::boot` refuses to run without it.
 
 ## Crates
 
 | Crate | Role | Dependencies (allowlist) |
 |---|---|---|
-| `jorb` (bin) | One request: parse, lock, recover, operate, report | `jorb-vmm`, `jorb-config-disk`, `tokio` (current-thread), `tracing`, `tracing-subscriber` (json), `anyhow`, `rustix` |
+| `jorb` (bin) | One request: read the variables, lock, clear dead orbs, apply the operation, report | `jorb-vmm`, `jorb-config-disk`, `tokio` (current-thread), `tracing`, `tracing-subscriber` (json), `anyhow`, `rustix` |
 | `jorb-vmm` (lib) | The generated Cloud Hypervisor client behind `VmShape`, `boot(socket, shape)`, `running(socket)`. Knows nothing of systemd, slots or Amp | `progenitor-client`, `reqwest` (no default features, `json`), `serde`, `serde_json`, `anyhow`; build: `progenitor`, `openapiv3`, `serde_yaml` |
 | `jorb-init` (bin, static musl) | Guest PID 1, synchronous | `jorb-config-disk`, `rustix`, `tracing`, `tracing-subscriber` (json), `anyhow` |
 | `jorb-config-disk` (lib) | The config disk's type, shared so the two cannot drift | `serde`, `serde_json` |

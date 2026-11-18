@@ -1,7 +1,6 @@
 //! What Amp asked for, parsed once from the untrusted `ORB_*` variables. This
 //! is the privilege boundary: every refusal jorb makes of Amp's input is here.
 
-use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::str::FromStr;
@@ -9,8 +8,9 @@ use std::str::FromStr;
 use anyhow::{Result, bail, ensure};
 use jorb_config_disk::ConfigDisk;
 
+use crate::limits;
 use crate::operations::Operation;
-use crate::{limits, required};
+use crate::variables::Variables;
 
 #[derive(Debug)]
 pub struct Request {
@@ -19,13 +19,13 @@ pub struct Request {
 }
 
 impl Request {
-    pub fn parse(variables: &HashMap<String, String>) -> Result<Self> {
-        let orb = required(variables, "ORB_ID")?.parse()?;
-        let operation = match required(variables, "ORB_OPERATION")? {
+    pub fn parse(variables: &Variables) -> Result<Self> {
+        let orb = variables.required("ORB_ID")?.parse()?;
+        let operation = match variables.required("ORB_OPERATION")? {
             "spawn" => {
                 let config_disk = ConfigDisk {
-                    orb_token: required(variables, "ORB_TOKEN")?.to_owned(),
-                    amp_url: variables.get("AMP_URL").cloned(),
+                    orb_token: variables.required("ORB_TOKEN")?.to_owned(),
+                    amp_url: variables.optional("AMP_URL").map(str::to_owned),
                 };
                 ensure!(!config_disk.orb_token.is_empty(), "ORB_TOKEN is empty");
                 config_disk.write_to(io::sink())?;
@@ -69,10 +69,9 @@ impl fmt::Display for OrbId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_variables;
 
     fn parse(variables: &[(&str, &str)]) -> Result<Request> {
-        Request::parse(&test_variables(variables))
+        Request::parse(&Variables::of(variables))
     }
 
     #[test]

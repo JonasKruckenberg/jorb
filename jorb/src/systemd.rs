@@ -1,52 +1,25 @@
-//! systemd: an orb's unit, which ones exist, starting and stopping one.
+//! systemd: starting and stopping an orb's unit, and finding the orbs whose
+//! units exist.
 //!
-//! The `jorb-orb-` prefix is what makes recover safe: no other unit on the
-//! host can be read as an orb's.
+//! Units are `jorb-orb-<id>.service`. The prefix is what makes clearing dead
+//! orbs safe: no other unit on the host can be read as an orb's.
 
 use anyhow::{Context, Result, ensure};
 
 use crate::request::OrbId;
-use crate::{limits, run_program as run};
+use crate::{command, limits};
 
 const PREFIX: &str = "jorb-orb-";
+const SUFFIX: &str = ".service";
 /// The host kills an orb before anything else.
 const OOM_SCORE_ADJUST: i32 = 500;
-const SUFFIX: &str = ".service";
 
-pub fn name(orb: &OrbId) -> String {
-    format!("{PREFIX}{orb}{SUFFIX}")
-}
-
-/// The orb a unit belongs to. The id goes back through the same parser as
-/// Amp's.
-pub fn orb_of(unit: &str) -> Option<OrbId> {
-    unit.strip_prefix(PREFIX)?
-        .strip_suffix(SUFFIX)?
-        .parse()
-        .ok()
-}
-
-/// Every orb unit systemd knows about, active or not.
-pub async fn orb_units() -> Result<Vec<String>> {
-    let pattern = format!("{PREFIX}*{SUFFIX}");
-    let listed = run(
-        "systemctl",
-        &["list-units", "--all", "--plain", "--no-legend", &pattern],
-    )
-    .await?;
-    Ok(listed
-        .lines()
-        .filter_map(|line| line.split_whitespace().next())
-        .take(limits::MAX_UNITS)
-        .map(str::to_owned)
-        .collect())
-}
-
+/// Starts `program` (with its arguments) as the orb's unit in `jorb.slice`.
 /// `--collect` so a failed unit leaves nothing behind; `Type=exec` so systemd
 /// waits for the exec. Returns the invocation id, which finds the unit's
 /// journal after `--collect` has removed the unit.
-pub async fn start(orb: &OrbId, command: &[String]) -> Result<String> {
-    let unit = name(orb);
+pub async fn start(orb: &OrbId, program: &[String]) -> Result<String> {
+    let unit = unit(orb);
     let mut arguments = vec![
         "--collect".to_owned(),
         format!("--unit={unit}"),
@@ -59,13 +32,12 @@ pub async fn start(orb: &OrbId, command: &[String]) -> Result<String> {
         ),
         "--".to_owned(),
     ];
-    arguments.extend_from_slice(command);
+    arguments.extend_from_slice(program);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-
-    run("systemd-run", &arguments)
+    command::run("systemd-run", &arguments)
         .await
         .with_context(|| format!("starting {unit}"))?;
-    let invocation = run(
+    let invocation = command::run(
         "systemctl",
         &["show", "--property=InvocationID", "--value", &unit],
     )
@@ -73,13 +45,13 @@ pub async fn start(orb: &OrbId, command: &[String]) -> Result<String> {
     Ok(invocation.trim().to_owned())
 }
 
-/// `systemctl stop` waits for the stop to finish, and its exit code is not the
-/// postcondition: an unknown unit fails to stop and is as stopped as can be.
-/// systemd's answer afterwards is.
+/// Stops the orb's unit. The postcondition is systemd's answer afterwards, not
+/// the stop's exit code: an unknown unit fails to stop and is as stopped as
+/// can be.
 pub async fn stop(orb: &OrbId) -> Result<()> {
-    let unit = name(orb);
-    let stopped = run("systemctl", &["stop", &unit]).await;
-    let state = run(
+    let unit = unit(orb);
+    let stopped = command::run("systemctl", &["stop", &unit]).await;
+    let state = command::run(
         "systemctl",
         &["show", "--property=ActiveState", "--value", &unit],
     )
@@ -93,6 +65,33 @@ pub async fn stop(orb: &OrbId) -> Result<()> {
     Ok(())
 }
 
+/// Every orb with a unit, active or not. Ids go back through the same parser
+/// as Amp's.
+pub async fn orbs() -> Result<Vec<OrbId>> {
+    let pattern = format!("{PREFIX}*{SUFFIX}");
+    let listed = command::run(
+        "systemctl",
+        &["list-units", "--all", "--plain", "--no-legend", &pattern],
+    )
+    .await?;
+    Ok(listed
+        .lines()
+        .filter_map(|line| orb_of(line.split_whitespace().next()?))
+        .take(limits::MAX_UNITS)
+        .collect())
+}
+
+fn unit(orb: &OrbId) -> String {
+    format!("{PREFIX}{orb}{SUFFIX}")
+}
+
+fn orb_of(unit: &str) -> Option<OrbId> {
+    unit.strip_prefix(PREFIX)?
+        .strip_suffix(SUFFIX)?
+        .parse()
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,8 +99,8 @@ mod tests {
     #[test]
     fn only_an_orbs_unit_names_an_orb() {
         let id: OrbId = "amp-T-1a2b".parse().unwrap();
-        assert_eq!(name(&id), "jorb-orb-amp-T-1a2b.service");
-        assert_eq!(orb_of(&name(&id)), Some(id));
+        assert_eq!(unit(&id), "jorb-orb-amp-T-1a2b.service");
+        assert_eq!(orb_of(&unit(&id)), Some(id));
 
         for unit in [
             "jorb-provider.service",

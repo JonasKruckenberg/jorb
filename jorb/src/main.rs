@@ -1,29 +1,29 @@
-//! One request from Amp: parse the environment, take the lock, run the
-//! operation, report. Exit 0 means the operation's postcondition was
-//! observed.
+//! One request from Amp: read the variables, take the lock, apply the
+//! operation, report. Exit 0 means the operation's postcondition was observed.
 //!
 //! jorb is crash-only: the start path is the recovery path, nothing is
 //! cleaned up on the way out, and no error branch tidies anything.
 
+mod command;
 mod limits;
 mod operations;
 mod request;
 mod settings;
 mod systemd;
+mod variables;
 mod vm;
 
-use std::collections::HashMap;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::process::ExitCode;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
-use tokio::process::Command;
 use tokio::time::{sleep, timeout};
-use tracing::{Level, debug, error, info, info_span};
+use tracing::{Level, error, info, info_span};
 
 use crate::request::Request;
 use crate::settings::Settings;
+use crate::variables::Variables;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
@@ -33,7 +33,7 @@ async fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
 
-    let parsed = environment().and_then(|variables| {
+    let parsed = Variables::from_process().and_then(|variables| {
         ensure!(std::env::args_os().len() == 1, "jorb takes no arguments");
         Ok((Request::parse(&variables)?, Settings::parse(&variables)?))
     });
@@ -70,42 +70,18 @@ async fn main() -> ExitCode {
     }
 }
 
-/// The variables jorb reads: `ORB_*` and `AMP_URL` from Amp, `JORB_*` from the
-/// root-side wrapper. One of those that is not UTF-8 is an error rather than
-/// absent; anything else in the environment is not jorb's business.
-fn environment() -> Result<HashMap<String, String>> {
-    let mut variables = HashMap::new();
-    for (name, value) in std::env::vars_os() {
-        let Ok(name) = name.into_string() else {
-            continue;
-        };
-        let ours = name.starts_with("ORB_") || name.starts_with("JORB_") || name == "AMP_URL";
-        match value.into_string() {
-            Ok(value) if ours => {
-                variables.insert(name, value);
-            }
-            Err(_) if ours => bail!("{name} is not UTF-8"),
-            _ => {}
-        }
-    }
-    Ok(variables)
-}
-
-pub fn required<'a>(variables: &'a HashMap<String, String>, name: &str) -> Result<&'a str> {
-    variables
-        .get(name)
-        .map(String::as_str)
-        .with_context(|| format!("{name} is not set"))
-}
-
+/// Holds the host's one lock for the whole request, so no two interleave, and
+/// applies the operation under a deadline below Amp's.
 async fn run(request: &Request, settings: &Settings) -> Result<()> {
     let _lock = lock(settings).await?;
-    timeout(limits::REQUEST_DEADLINE, operations::run(settings, request))
-        .await
-        .with_context(|| format!("not finished within {:?}", limits::REQUEST_DEADLINE))?
+    timeout(
+        limits::REQUEST_DEADLINE,
+        operations::apply(settings, request),
+    )
+    .await
+    .with_context(|| format!("not finished within {:?}", limits::REQUEST_DEADLINE))?
 }
 
-/// The host's one lock, held for the whole request, so no two interleave.
 async fn lock(settings: &Settings) -> Result<File> {
     let path = settings.lock_path();
     let file = OpenOptions::new()
@@ -128,43 +104,4 @@ async fn lock(settings: &Settings) -> Result<File> {
             Err(TryLockError::Error(error)) => return Err(error.into()),
         }
     }
-}
-
-/// Runs a program with separate arguments and returns its stdout. No shell,
-/// because `ORB_ID` reaches some arguments; no token in the child's
-/// environment; and a child that outlives the timeout is killed.
-pub async fn run_program(program: &str, arguments: &[&str]) -> Result<String> {
-    debug!(program, ?arguments, "running");
-    let output = timeout(
-        limits::SUBPROCESS_TIMEOUT,
-        Command::new(program)
-            .args(arguments)
-            .env_remove("ORB_TOKEN")
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .with_context(|| {
-        format!(
-            "{program} did not finish within {:?}",
-            limits::SUBPROCESS_TIMEOUT
-        )
-    })?
-    .with_context(|| format!("running {program}"))?;
-
-    ensure!(
-        output.status.success(),
-        "{program} exited with {}: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-#[cfg(test)]
-pub fn test_variables(variables: &[(&str, &str)]) -> HashMap<String, String> {
-    variables
-        .iter()
-        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-        .collect()
 }
