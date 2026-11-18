@@ -14,6 +14,11 @@ pub const MAX_ORB_ID_LEN: usize = 64;
 /// byte of the address.
 pub const MAX_SLOTS: u16 = 256;
 
+/// The v1 orb size, used when the host does not set `JORB_VCPUS` or
+/// `JORB_MEMORY_MIB`.
+pub const DEFAULT_VCPUS: std::num::NonZeroU8 = std::num::NonZeroU8::new(4).unwrap();
+pub const DEFAULT_MEMORY_MIB: std::num::NonZeroU32 = std::num::NonZeroU32::new(6144).unwrap();
+
 /// The config disk's size, which both ends agree on: jorb pads to it and
 /// jorb-init reads it. One block holds the two keys v1 has many times over,
 /// and a fixed size makes "identical config" a byte comparison.

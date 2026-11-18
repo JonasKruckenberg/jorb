@@ -1073,3 +1073,28 @@ nixpkgs.
   `/nix/store/sii8k9vh…-cloud-hypervisor-54.1`, the same path as the flake's
   package, and its `src` is `/nix/store/475y2r9n…-source`, which is where
   `CH_OPENAPI_SPEC` points.
+
+### R3. Remove clap
+
+Confirmed: the `Only` parser shim was in three test modules, and `Request`
+had a `--token` flag that must never be used.
+
+Phase 3 was done in the order R3, R2, R6, R7, then R1, R4 and R5 together,
+then R8 and R9, because R1, R4 and R5 are one move of the same code and
+splitting them would mean writing each file three times.
+
+- `Request::from_environment` and `HostConfig::from_environment` read through
+  an `Environment` (a `&dyn Fn(&str) -> Result<Option<String>>`), which is
+  `std::env::var` in a job and a table in a test. A set but non-UTF-8 variable
+  is an error, not absent. Edition 2024 makes `set_var` unsafe, which is why
+  tests pass a table rather than set the process environment.
+- Behaviour change: `JORB_SLOTS` outside `1..=256` is refused at parse time.
+  clap accepted any `NonZeroU16` and the code clamped it to 256.
+- `clap` is gone from `jorb/Cargo.toml` and `Cargo.lock`
+  (`grep -c '"clap' Cargo.lock` is 0); no `struct Only` remains. AGENTS.md's
+  allowlist is updated.
+- The container check: clean, 28 tests (one new, for refused host settings).
+- In the container: `jorb` with no variables logs `"error":"ORB_OPERATION is
+  not set"`; `ORB_ID=../x` logs `"ORB_ID: an orb id must start with a letter
+  or a digit, and '.' does not"`; `JORB_SLOTS=300` logs `"JORB_SLOTS is 300,
+  and a host has between 1 and 256 slots"`. Each exits 1.

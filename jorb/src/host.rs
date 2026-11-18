@@ -4,14 +4,16 @@
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
+use std::num::{NonZeroU8, NonZeroU32};
+use std::str::FromStr;
+
 use anyhow::{Context, Result, ensure};
-use clap::Args;
 use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::debug;
 
-use crate::constants;
 use crate::request::OrbId;
+use crate::{Environment, constants, required};
 
 /// This host as the Nix module describes it: how many orbs it will run, how
 /// big each one is, and where its files live. A description, not a handle:
@@ -19,37 +21,56 @@ use crate::request::OrbId;
 ///
 /// Every value comes from a `JORB_*` variable the root-side wrapper sets, so
 /// none of it is the caller's to choose. See Security in `AGENTS.md`.
-#[derive(Debug, Args)]
+#[derive(Debug)]
 pub struct HostConfig {
-    /// How many orbs may run at once. Each one holds a slot.
-    #[arg(long, env = "JORB_SLOTS", default_value = "1")]
-    slots: std::num::NonZeroU16,
+    /// How many orbs may run at once, `1..=MAX_SLOTS`. Each one holds a slot.
+    slots: u16,
 
-    #[arg(long, env = "JORB_VCPUS", default_value = "4")]
-    pub vcpus: std::num::NonZeroU8,
-
-    #[arg(long, env = "JORB_MEMORY_MIB", default_value = "6144")]
-    pub memory_mib: std::num::NonZeroU32,
+    pub vcpus: NonZeroU8,
+    pub memory_mib: NonZeroU32,
 
     /// The guest kernel, which `nix build .#guest-kernel` produces.
-    #[arg(long, env = "JORB_KERNEL")]
     pub kernel: PathBuf,
 
     /// Where the base image and the orbs' disks live. XFS, for reflinks.
-    #[arg(long, env = "JORB_STATE_DIR", default_value = constants::STATE_DIR)]
     state_dir: PathBuf,
 
     /// Where the config disks and API sockets live. Cleared on boot.
-    #[arg(long, env = "JORB_RUN_DIR", default_value = constants::RUN_DIR)]
     run_dir: PathBuf,
 
     /// The VMM to run. A setting so the bounds tests can point it at a
     /// program that never opens its socket.
-    #[arg(long, env = "JORB_CH_BIN", default_value = constants::CLOUD_HYPERVISOR)]
     pub cloud_hypervisor: PathBuf,
 }
 
 impl HostConfig {
+    pub fn from_environment(environment: Environment) -> Result<Self> {
+        let slots = setting(environment, "JORB_SLOTS", 1)?;
+        ensure!(
+            (1..=constants::MAX_SLOTS).contains(&slots),
+            "JORB_SLOTS is {slots}, and a host has between 1 and {} slots",
+            constants::MAX_SLOTS
+        );
+
+        Ok(Self {
+            slots,
+            vcpus: setting(environment, "JORB_VCPUS", constants::DEFAULT_VCPUS)?,
+            memory_mib: setting(
+                environment,
+                "JORB_MEMORY_MIB",
+                constants::DEFAULT_MEMORY_MIB,
+            )?,
+            kernel: required(environment, "JORB_KERNEL")?.into(),
+            state_dir: setting(environment, "JORB_STATE_DIR", constants::STATE_DIR.into())?,
+            run_dir: setting(environment, "JORB_RUN_DIR", constants::RUN_DIR.into())?,
+            cloud_hypervisor: setting(
+                environment,
+                "JORB_CH_BIN",
+                constants::CLOUD_HYPERVISOR.into(),
+            )?,
+        })
+    }
+
     /// The ext4 image every orb's disk is cloned from.
     pub fn base_image(&self) -> PathBuf {
         self.state_dir.join(constants::BASE_IMAGE)
@@ -77,10 +98,20 @@ impl HostConfig {
         &self.run_dir
     }
 
-    /// How many slots this host has: what it was configured for, bounded by
-    /// what a slot's addressing can express.
     pub fn slot_count(&self) -> u16 {
-        self.slots.get().min(constants::MAX_SLOTS)
+        self.slots
+    }
+}
+
+/// A setting, or its default when the variable is not set.
+fn setting<T>(environment: Environment, name: &str, default: T) -> Result<T>
+where
+    T: FromStr,
+    T::Err: std::error::Error + Send + Sync + 'static,
+{
+    match environment(name)? {
+        Some(raw) => raw.parse().with_context(|| format!("{name} is {raw:?}")),
+        None => Ok(default),
     }
 }
 
@@ -197,22 +228,15 @@ pub async fn run(program: &str, arguments: &[&str]) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
-
     use super::*;
-
-    /// `HostConfig` is flattened into the real parser, so a test needs one of its
-    /// own to parse it alone.
-    #[derive(Parser)]
-    struct Only {
-        #[command(flatten)]
-        host: HostConfig,
-    }
+    use crate::test_environment;
 
     fn test_host() -> HostConfig {
-        Only::try_parse_from(["jorb", "--kernel", "/var/lib/jorb/kernel"])
-            .expect("the host parses")
-            .host
+        HostConfig::from_environment(&test_environment(&[(
+            "JORB_KERNEL",
+            "/var/lib/jorb/kernel",
+        )]))
+        .expect("the host parses")
     }
 
     fn orb(raw: &str) -> OrbId {
@@ -223,11 +247,30 @@ mod tests {
     fn the_host_describes_the_v1_machine_by_default() {
         let host = test_host();
 
-        assert_eq!(host.slots.get(), 1);
+        assert_eq!(host.slots, 1);
         assert_eq!(host.vcpus.get(), 4);
         assert_eq!(host.memory_mib.get(), 6144);
         assert_eq!(host.state_dir, Path::new(constants::STATE_DIR));
         assert_eq!(host.run_directory(), Path::new(constants::RUN_DIR));
+    }
+
+    #[test]
+    fn a_host_outside_what_slots_can_address_is_refused() {
+        for (name, value) in [
+            ("JORB_SLOTS", "0"),
+            ("JORB_SLOTS", "257"),
+            ("JORB_VCPUS", "0"),
+            ("JORB_MEMORY_MIB", "lots"),
+        ] {
+            let environment =
+                test_environment(&[("JORB_KERNEL", "/var/lib/jorb/kernel"), (name, value)]);
+            assert!(
+                HostConfig::from_environment(&environment).is_err(),
+                "{name}={value} should be refused"
+            );
+        }
+
+        assert!(HostConfig::from_environment(&test_environment(&[])).is_err());
     }
 
     #[test]

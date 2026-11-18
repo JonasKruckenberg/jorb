@@ -257,15 +257,8 @@ fn remove_if_present(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
-
     use super::*;
-
-    #[derive(Parser)]
-    struct Only {
-        #[command(flatten)]
-        host: HostConfig,
-    }
+    use crate::test_environment;
 
     /// A host whose directories are this test's own, so nothing it writes
     /// lands in /var/lib/jorb or /run/jorb.
@@ -273,17 +266,13 @@ mod tests {
         let directory = std::env::temp_dir().join("jorb-tests").join(name);
         std::fs::create_dir_all(&directory).unwrap();
 
-        Only::try_parse_from([
-            "jorb",
-            "--kernel",
-            "/var/lib/jorb/kernel",
-            "--state-dir",
-            directory.to_str().unwrap(),
-            "--run-dir",
-            directory.to_str().unwrap(),
-        ])
+        let directory = directory.to_str().unwrap();
+        HostConfig::from_environment(&test_environment(&[
+            ("JORB_KERNEL", "/var/lib/jorb/kernel"),
+            ("JORB_STATE_DIR", directory),
+            ("JORB_RUN_DIR", directory),
+        ]))
         .expect("the host parses")
-        .host
     }
 
     #[test]

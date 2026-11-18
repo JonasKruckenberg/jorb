@@ -12,13 +12,13 @@ mod orb;
 mod request;
 mod systemd;
 
+use std::env::VarError;
 use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use anyhow::{Context, Result, ensure};
-use clap::Parser;
+use anyhow::{Context, Result, bail, ensure};
 use jorb_vmm::VmState;
 use tokio::time::{sleep, timeout};
 use tracing::{Level, debug, error, info, info_span, instrument};
@@ -33,14 +33,30 @@ use crate::request::{ConfigDisk, Operation, Request};
 /// untrusted `ORB_*` from the provider, and `JORB_*` from the root-side
 /// wrapper. Keeping them apart here puts that boundary in every signature
 /// below.
-#[derive(Debug, Parser)]
-#[command(about = "Runs one Amp orb job on this host")]
+#[derive(Debug)]
 struct Invocation {
-    #[command(flatten)]
     request: Request,
-
-    #[command(flatten)]
     host: HostConfig,
+}
+
+/// Where a parser reads its variables: the process environment in a job, a
+/// table in a test. A variable that is set but not UTF-8 is an error rather
+/// than absent.
+pub type Environment<'a> = &'a dyn Fn(&str) -> Result<Option<String>>;
+
+/// One variable from the process environment.
+fn process_environment(name: &str) -> Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(VarError::NotPresent) => Ok(None),
+        Err(VarError::NotUnicode(_)) => bail!("{name} is set but is not UTF-8"),
+    }
+}
+
+/// A variable the job cannot do without. Never used for a secret: the name is
+/// in the message, and so would be nothing else.
+pub fn required(environment: Environment, name: &str) -> Result<String> {
+    environment(name)?.with_context(|| format!("{name} is not set"))
 }
 
 /// Exit 0 means the operation's postcondition was observed. Anything else
@@ -64,11 +80,20 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let invocation = match Invocation::try_parse() {
+    let parsed = Request::from_environment(&process_environment).and_then(|request| {
+        Ok(Invocation {
+            request,
+            host: HostConfig::from_environment(&process_environment)?,
+        })
+    });
+    let invocation = match parsed {
         Ok(invocation) => invocation,
         Err(error) => {
-            // clap's own message, as one event instead of on stdout.
-            error!(outcome = "rejected", error = error.to_string(), "bad job");
+            error!(
+                outcome = "rejected",
+                error = format!("{error:#}"),
+                "bad job"
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -238,4 +263,22 @@ async fn spawn(orb: &Orb<'_>, request: &Request, state: VmState) -> Result<()> {
     orb.stop().await?;
     orb.ensure_disk().await?;
     orb.start(&config_disk).await
+}
+
+/// An environment holding exactly these variables, for tests.
+#[cfg(test)]
+pub fn test_environment(
+    variables: &[(&str, &str)],
+) -> impl Fn(&str) -> Result<Option<String>> + use<> {
+    let variables: Vec<(String, String)> = variables
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+        .collect();
+
+    move |wanted| {
+        Ok(variables
+            .iter()
+            .find(|(name, _)| name == wanted)
+            .map(|(_, value)| value.clone()))
+    }
 }

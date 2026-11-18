@@ -8,38 +8,55 @@
 
 use std::str::FromStr;
 
-use anyhow::{Context, Result, ensure};
-use clap::{Args, ValueEnum};
+use anyhow::{Context, Result, bail, ensure};
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::constants;
+use crate::{Environment, constants, required};
 
 /// What Amp asked for: an operation, the orb to apply it to, and on spawn the
 /// credential that orb will connect with.
-#[derive(Debug, Args)]
+#[derive(Debug)]
 pub struct Request {
-    #[arg(long, env = "ORB_OPERATION")]
     pub operation: Operation,
-
-    #[arg(long, env = "ORB_ID")]
     pub orb: OrbId,
 
     /// Present on spawn only, and short-lived: Amp mints it per spawn job.
-    #[arg(long, env = "ORB_TOKEN")]
     pub token: Option<SecretString>,
 
     /// A non-default Amp endpoint, when the provider was told to use one.
-    #[arg(long, env = "AMP_URL")]
     pub amp_url: Option<String>,
 }
 
+impl Request {
+    pub fn from_environment(environment: Environment) -> Result<Self> {
+        Ok(Self {
+            operation: required(environment, "ORB_OPERATION")?.parse()?,
+            orb: required(environment, "ORB_ID")?.parse().context("ORB_ID")?,
+            token: environment("ORB_TOKEN")?.map(SecretString::from),
+            amp_url: environment("AMP_URL")?,
+        })
+    }
+}
+
 /// The target state an operation converges on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-#[value(rename_all = "lower")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
     Spawn,
     Pause,
     Delete,
+}
+
+impl FromStr for Operation {
+    type Err = anyhow::Error;
+
+    fn from_str(raw: &str) -> Result<Self> {
+        match raw {
+            "spawn" => Ok(Self::Spawn),
+            "pause" => Ok(Self::Pause),
+            "delete" => Ok(Self::Delete),
+            _ => bail!("ORB_OPERATION is {raw:?}, which is not spawn, pause or delete"),
+        }
+    }
 }
 
 /// An orb id, checked once to be safe as a file name, a unit name and a
@@ -147,22 +164,11 @@ impl std::fmt::Debug for ConfigDisk {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
-
     use super::*;
+    use crate::test_environment;
 
-    /// `Request` is flattened into the real parser, so a test needs one of its
-    /// own to parse it alone.
-    #[derive(Parser)]
-    struct Only {
-        #[command(flatten)]
-        request: Request,
-    }
-
-    fn parse(arguments: &[&str]) -> Request {
-        Only::try_parse_from(arguments)
-            .expect("the request parses")
-            .request
+    fn parse(variables: &[(&str, &str)]) -> Result<Request> {
+        Request::from_environment(&test_environment(variables))
     }
 
     fn refusal(raw: &str) -> String {
@@ -224,22 +230,19 @@ mod tests {
 
     #[test]
     fn an_unknown_operation_is_refused() {
-        assert!(
-            Only::try_parse_from(["jorb", "--operation", "destroy", "--orb", "amp-1"]).is_err()
-        );
+        assert!(parse(&[("ORB_OPERATION", "destroy"), ("ORB_ID", "amp-1")]).is_err());
+        assert!(parse(&[("ORB_OPERATION", "Spawn"), ("ORB_ID", "amp-1")]).is_err());
+        assert!(parse(&[("ORB_ID", "amp-1")]).is_err());
     }
 
     #[test]
     fn the_token_does_not_appear_in_a_requests_debug_output() {
         let request = parse(&[
-            "jorb",
-            "--operation",
-            "spawn",
-            "--orb",
-            "amp-1",
-            "--token",
-            "a-token-that-must-not-leak",
-        ]);
+            ("ORB_OPERATION", "spawn"),
+            ("ORB_ID", "amp-1"),
+            ("ORB_TOKEN", "a-token-that-must-not-leak"),
+        ])
+        .unwrap();
 
         let printed = format!("{request:?}");
 
@@ -252,7 +255,7 @@ mod tests {
 
     #[test]
     fn a_request_without_a_token_parses_because_only_spawn_needs_one() {
-        let request = parse(&["jorb", "--operation", "delete", "--orb", "amp-1"]);
+        let request = parse(&[("ORB_OPERATION", "delete"), ("ORB_ID", "amp-1")]).unwrap();
 
         assert_eq!(request.operation, Operation::Delete);
         assert!(request.token.is_none());
