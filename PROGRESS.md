@@ -983,3 +983,44 @@ of them; the kernel derivation now builds `arch/arm64/boot/Image` only.
 - `nixfmt --check flake.nix nix/*.nix` and `shellcheck -x` over every script:
   clean. The container check: clean, 27 tests pass.
 - `nix flake check`: not run on Linux.
+
+### S3. Host readiness moves into the Nix module
+
+Confirmed: `jorb-setup.service` ran `jorb init` (now deleted by S1), and the
+`stateImage` assertion was `!lib.hasPrefix "/" cfg.stateImage`, which rejects
+every absolute path. PROGRESS.md's earlier claim that it compared against
+`"${stateDirectory}/"` was wrong; see D1.
+
+Now, in `nix/module.nix`:
+
+- tmpfiles creates the state directory, its `disks` and the run directory at
+  0700. jorb no longer creates them itself, so they have one owner; a missing
+  directory is a loud error in the job.
+- With `stateImage` set, `jorb-state-image.service` (no default dependencies,
+  `RequiresMountsFor` the image's parent) creates the file only if absent:
+  truncate and `mkfs.xfs` under `<image>.partial`, then rename. A
+  `fileSystems` loop mount with `nofail`, `discard`,
+  `x-systemd.requires=jorb-state-image.service`, and
+  `x-systemd.before=systemd-tmpfiles-setup.service` so the directories are
+  made on the mount rather than under it.
+- `jorb-base-image.service` runs `jorb-prepare-image`: `TimeoutStartSec=30min`,
+  `Restart=on-failure` every 30 s, no start limit. The provider `Requires` and
+  orders after it, and `RequiresMountsFor` the state directory.
+- The assertion compares against `"${cfg.stateDirectory}/"`.
+
+Checks:
+
+- `nix eval` of the check host's `system.build.toplevel.drvPath`, which runs
+  the NixOS assertions: evaluates. With `stateImage = "/var/lib/jorb/inside.img"`
+  it fails with the assertion's message, as it should.
+- The generated fstab line:
+  `/var/lib/jorb.img /var/lib/jorb xfs loop,nofail,discard,x-systemd.requires=jorb-state-image.service,x-systemd.before=systemd-tmpfiles-setup.service 0 2`.
+- The flake's module check greps for `Requires=jorb-base-image.service` and
+  that fstab line instead of the old setup unit. Its `drvPath` evaluates; the
+  check itself needs a Linux builder.
+- nixfmt clean; the container check clean.
+- `[host]` boot with no base image ends with the provider active and the
+  image built: awaiting a host run. One thing that run should watch: whether
+  the provider's start job keeps waiting while `jorb-base-image` is in its
+  restart delay. systemd is meant to hold a dependent job across an automatic
+  restart, but this has not been observed here.

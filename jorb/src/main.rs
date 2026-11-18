@@ -124,11 +124,6 @@ async fn run_job(invocation: &Invocation) -> Result<Transition> {
     let request = &invocation.request;
     let orb = Orb::new(host, &request.orb);
 
-    for directory in [host.disks_directory(), host.run_directory().to_path_buf()] {
-        std::fs::create_dir_all(&directory)
-            .with_context(|| format!("creating {}", directory.display()))?;
-    }
-
     let _lock = take_host_lock(&host.lock()).await?;
 
     timeout(constants::JOB_DEADLINE, async {

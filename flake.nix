@@ -252,7 +252,9 @@
               # being written down.
               evaluated = pkgs.writeTextDir "evidence" ''
                 ${host.config.systemd.units."jorb-provider.service".text}
-                ${host.config.systemd.units."jorb-setup.service".text}
+                ${host.config.systemd.units."jorb-base-image.service".text}
+                ${host.config.systemd.units."jorb-state-image.service".text}
+                ${host.config.environment.etc.fstab.text}
                 ${host.config.systemd.units."jorb.slice".text}
                 ${host.config.environment.etc.sudoers.source}
                 net.ipv4.ip_forward = ${toString host.config.boot.kernel.sysctl."net.ipv4.ip_forward"}
@@ -279,10 +281,11 @@
                   | all(.targets | length > 0 and all(.expr | length > 0))
                 ' ${./nix/jorb-dashboard.json} >/dev/null
 
-                # The provider must wait for the host to be made ready, and
-                # the setup unit must carry the state image through.
-                grep -q 'Requires=jorb-setup.service' "${evaluated}/evidence"
-                grep -q -- '--create-state-image --state-image /var/lib/jorb.img' \
+                # The provider must wait for the base image, and the state
+                # image must be mounted on the state directory after the unit
+                # that creates it.
+                grep -q 'Requires=jorb-base-image.service' "${evaluated}/evidence"
+                grep -q '/var/lib/jorb.img /var/lib/jorb xfs .*x-systemd.requires=jorb-state-image.service' \
                   "${evaluated}/evidence"
 
                 mkdir -p "$out"

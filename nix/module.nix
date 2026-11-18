@@ -32,9 +32,7 @@ let
     "AMP_URL"
   ];
 
-  # The host as jorb is told about it. Defined once: the root side of the sudo
-  # rule and the setup unit are the two things that run jorb as root, and they
-  # must agree about which host this is.
+  # The host as jorb is told about it.
   hostEnvironment = {
     JORB_SLOTS = toString cfg.slots;
     JORB_VCPUS = toString cfg.vcpus;
@@ -46,9 +44,7 @@ let
 
   # The root side: the only program the sudo rule allows.
   #
-  # It takes no arguments and passes none on. jorb's commands create
-  # filesystems and pull images, and the provider is closed-source and
-  # unprivileged, so the sudo rule reaches one job and nothing else.
+  # It takes no arguments and passes none on.
   rootSide = pkgs.writeShellApplication {
     name = "jorb-root";
     runtimeInputs = [
@@ -182,9 +178,9 @@ in
       example = "/var/lib/jorb.img";
       description = ''
         An XFS image to create and mount on `stateDirectory`, for a host whose
-        filesystem cannot reflink. `jorb init` makes it if it is missing and
-        mounts it before the provider starts; leave it null on a host where
-        `stateDirectory` is already XFS or btrfs.
+        filesystem cannot reflink. A oneshot creates it if it is missing and a
+        loop mount puts it on `stateDirectory` before the provider starts;
+        leave it null on a host where `stateDirectory` is already XFS or btrfs.
 
         It has to sit outside `stateDirectory`, or the mount would hide it.
       '';
@@ -261,7 +257,7 @@ in
     (mkIf cfg.enable {
       assertions = [
         {
-          assertion = cfg.stateImage == null || !lib.hasPrefix "/" cfg.stateImage;
+          assertion = cfg.stateImage == null || !lib.hasPrefix "${cfg.stateDirectory}/" cfg.stateImage;
           message =
             "services.jorb.stateImage (${toString cfg.stateImage}) is inside"
             + " stateDirectory (${cfg.stateDirectory}), where mounting it would hide it.";
@@ -309,13 +305,14 @@ in
         wantedBy = [ "multi-user.target" ];
         after = [
           "network-online.target"
-          "jorb-setup.service"
+          "jorb-base-image.service"
         ];
         wants = [ "network-online.target" ];
         # A provider on a host that is not ready would take jobs it cannot
-        # finish, so it waits for the unit that makes it ready and fails with
-        # it.
-        requires = [ "jorb-setup.service" ];
+        # finish, so it waits for the base image and the state directory's
+        # mount.
+        requires = [ "jorb-base-image.service" ];
+        unitConfig.RequiresMountsFor = [ cfg.stateDirectory ];
 
         serviceConfig = {
           ExecStart = "${cfg.ampPackage}/bin/amp orb provider ${dispatch}/bin/jorb-dispatch";
@@ -340,37 +337,84 @@ in
         };
       };
 
-      # One unit makes the host ready, and it is the same command a host
-      # without Nix runs: the directories, a filesystem that can clone, the
-      # base image, and preflight to prove it. tmpfiles used to create the
-      # directories, which meant two owners for one job.
-      systemd.services.jorb-setup = {
-        description = "Prepare this host to run orbs";
-        wantedBy = [ "multi-user.target" ];
+      # Mode 0700: a config disk under the run directory holds a token.
+      systemd.tmpfiles.rules = [
+        "d ${cfg.stateDirectory} 0700 root root -"
+        "d ${cfg.stateDirectory}/disks 0700 root root -"
+        "d ${cfg.runtimeDirectory} 0700 root root -"
+      ];
+
+      # The image pull takes minutes and needs the network, so it gets its own
+      # unit and a generous timeout, and retries until it works. The
+      # provider's start waits for it.
+      systemd.services.jorb-base-image = {
+        description = "Build the base image every orb's disk is cloned from";
         after = [ "network-online.target" ];
         wants = [ "network-online.target" ];
-
-        environment = hostEnvironment;
-        path = [
-          cfg.cloudHypervisorPackage
-          cfg.prepareImagePackage
-          config.systemd.package
-          pkgs.util-linux
-          pkgs.xfsprogs
-        ];
+        unitConfig.RequiresMountsFor = [ cfg.stateDirectory ];
+        environment.JORB_STATE_DIR = cfg.stateDirectory;
 
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;
-          ExecStart =
-            "${cfg.package}/bin/jorb init"
-            + lib.optionalString (cfg.stateImage != null) (
-              " --create-state-image --state-image ${cfg.stateImage}"
-              + " --state-image-gib ${toString cfg.stateImageGiB}"
-            );
+          ExecStart = "${cfg.prepareImagePackage}/bin/jorb-prepare-image";
+          TimeoutStartSec = "30min";
+          Restart = "on-failure";
+          RestartSec = 30;
         };
+        # Retry until the network comes back rather than giving up after five.
+        startLimitIntervalSec = 0;
+      };
+    })
+
+    (mkIf (cfg.enable && cfg.stateImage != null) {
+      # Created once, under a temporary name and renamed, so a kill leaves
+      # either no image or a formatted one.
+      systemd.services.jorb-state-image = {
+        description = "Create the XFS image jorb's state directory is mounted from";
+        unitConfig = {
+          DefaultDependencies = false;
+          RequiresMountsFor = [ (dirOf cfg.stateImage) ];
+        };
+        path = [
+          pkgs.coreutils
+          pkgs.xfsprogs
+        ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
+        script = ''
+          image=${lib.escapeShellArg cfg.stateImage}
+          if [ -e "$image" ]; then
+            exit 0
+          fi
+          partial="$image.partial"
+          rm -f "$partial"
+          truncate -s ${toString cfg.stateImageGiB}G "$partial"
+          mkfs.xfs -q -L jorb "$partial"
+          sync "$partial"
+          mv "$partial" "$image"
+          sync "$(dirname "$image")"
+        '';
       };
 
+      # Before tmpfiles, so the directories it creates land on the mount
+      # rather than under it.
+      fileSystems.${cfg.stateDirectory} = {
+        device = cfg.stateImage;
+        fsType = "xfs";
+        options = [
+          "loop"
+          "nofail"
+          "discard"
+          "x-systemd.requires=jorb-state-image.service"
+          "x-systemd.before=systemd-tmpfiles-setup.service"
+        ];
+      };
+    })
+
+    (mkIf cfg.enable {
       # An orb that is throttled by MemoryHigh reclaims into zram rather than
       # onto a disk, which is both faster and kinder to the SSD.
       zramSwap.enable = true;
