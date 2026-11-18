@@ -284,6 +284,15 @@
                 # The provider must wait for the base image, and the state
                 # image must be mounted on the state directory after the unit
                 # that creates it.
+                # The one sudo rule: the provider user, as root only, without
+                # SETENV, which would let the caller set any variable.
+                grep -q '^jorb[[:space:]]*ALL=(root)[[:space:]]*NOPASSWD: /nix/store/[^ ]*-jorb-root/bin/jorb-root$' \
+                  "${evaluated}/evidence"
+                if grep -q SETENV "${evaluated}/evidence"; then
+                  echo "the sudo rule carries SETENV" >&2
+                  exit 1
+                fi
+
                 grep -q 'Requires=jorb-base-image.service' "${evaluated}/evidence"
                 grep -q '/var/lib/jorb.img /var/lib/jorb xfs .*x-systemd.requires=jorb-state-image.service' \
                   "${evaluated}/evidence"

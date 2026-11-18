@@ -1024,3 +1024,24 @@ Checks:
   the provider's start job keeps waiting while `jorb-base-image` is in its
   restart delay. systemd is meant to hold a dependent job across an automatic
   restart, but this has not been observed here.
+
+### C1. The sudo rule gave the provider user root
+
+Confirmed: the rule carried `SETENV`, `jorb-root` never set `JORB_CH_BIN`,
+and that variable chose the program `systemd-run` started as root. With
+`SETENV`, `sudo FOO=1 jorb-root` passes `FOO` past `env_reset`.
+
+- `SETENV` is gone and the rule has `runAs = "root"`. Generated line:
+  `jorb ALL=(root) NOPASSWD: /nix/store/…-jorb-root/bin/jorb-root`.
+- `jorb-root` unsets every exported variable except the four `ORB_*`/`AMP_URL`
+  names, then exports `PATH` (systemd only), `JORB_CH_BIN` (the VMM as an
+  absolute store path) and every other `JORB_*` setting. The review said
+  `exec env -i` with an explicit list; that would put `ORB_TOKEN` in `env`'s
+  argv, which AGENTS.md forbids, so the shell unsets instead. Same result.
+- The module check now greps the sudoers for that line and fails on any
+  `SETENV`. Its `drvPath` evaluates; building it needs Linux.
+- The cleaning loop, run alone under `env -i FOO=1 LD_PRELOAD=x
+  JORB_CH_BIN=/evil ORB_ID=a ORB_TOKEN=t HOME=/root bash`, left only
+  `ORB_ID`, `ORB_TOKEN`, the exported settings and bash's own `SHLVL`.
+- `[host]` `sudo -u jorb sudo -n FOO=1 <jorb-root>` is refused: awaiting a
+  host run.

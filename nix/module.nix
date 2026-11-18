@@ -32,8 +32,11 @@ let
     "AMP_URL"
   ];
 
-  # The host as jorb is told about it.
+  # The host as jorb is told about it, and the only programs jorb runs. The
+  # VMM is an absolute store path so nothing on the caller's side picks it.
   hostEnvironment = {
+    PATH = lib.makeBinPath [ config.systemd.package ];
+    JORB_CH_BIN = "${cfg.cloudHypervisorPackage}/bin/cloud-hypervisor";
     JORB_SLOTS = toString cfg.slots;
     JORB_VCPUS = toString cfg.vcpus;
     JORB_MEMORY_MIB = toString cfg.memoryMiB;
@@ -42,18 +45,22 @@ let
     JORB_RUN_DIR = cfg.runtimeDirectory;
   };
 
-  # The root side: the only program the sudo rule allows.
+  # The root side: the only program the sudo rule allows. It takes no
+  # arguments and passes none on.
   #
-  # It takes no arguments and passes none on.
+  # jorb starts from an environment holding the four preserved variables and
+  # the host's own settings, nothing else. Unsetting in the shell rather than
+  # `env -i NAME=VALUE` keeps ORB_TOKEN out of every argv.
   rootSide = pkgs.writeShellApplication {
     name = "jorb-root";
-    runtimeInputs = [
-      config.systemd.package
-      cfg.cloudHypervisorPackage
-    ];
     text = ''
-      # Set, not defaulted: whatever the caller had to say about the host is
-      # not interesting.
+      for name in $(compgen -e); do
+        case $name in
+        ${lib.concatStringsSep " | " preserved}) ;;
+        *) unset "$name" ;;
+        esac
+      done
+
       ${lib.concatStringsSep "\n" (
         lib.mapAttrsToList (name: value: "export ${name}=${lib.escapeShellArg value}") hostEnvironment
       )}
@@ -281,13 +288,13 @@ in
         extraRules = [
           {
             users = [ "jorb" ];
+            runAs = "root";
+            # No SETENV: with it, variables on the sudo command line bypass
+            # env_keep, and the caller could pick LD_PRELOAD or the VMM.
             commands = [
               {
                 command = "${rootSide}/bin/jorb-root";
-                options = [
-                  "NOPASSWD"
-                  "SETENV"
-                ];
+                options = [ "NOPASSWD" ];
               }
             ];
           }
