@@ -1116,3 +1116,28 @@ spawn without a token was refused late, inside `ConfigDisk::new`.
 - `grep -rn 'Option<SecretString>' jorb/src`: nothing. Missing and empty
   tokens are parse errors with their own test, `spawn_without_a_token_is_a_parse_error`.
 - The container check: clean, 28 tests.
+
+### R6. One definition of the host-guest contract
+
+Confirmed: jorb encoded the config disk in `request.rs` and jorb-init parsed
+it in its `main.rs`, each with its own `CONFIG_DISK_BYTES`, and they
+disagreed: jorb-init's parser trimmed each line, so a value with leading or
+trailing whitespace would not read back as written. jorb-init also used
+`str::lines`, which drops a trailing `\r`.
+
+- New crate `jorb-config-disk`, no dependencies: `BYTES`, `ConfigDisk::encode`,
+  `parse`, and an `Error` whose messages never carry a value. The parser
+  splits on `\n` only and trims nothing. A line without `=` is now an error
+  rather than skipped, because the encoder cannot produce one.
+- jorb's `job::config_disk(token, amp_url)` builds the entries; jorb-init
+  calls `jorb_config_disk::parse`. Both constants files lost their copy of
+  the size. PLAN.md's T5 chose two parsers over a shared crate; this reverses
+  that, as the review asked, because the two had already drifted.
+- The round-trip test encodes and parses every string of up to three
+  characters over `a`, space, `=`, `\r`, tab, `#`, `é` and an emoji (585
+  values) and requires byte-identical results. The shape, refusal, padding
+  and redaction tests moved into the crate.
+- AGENTS.md's Crates table has the new crate, and both binaries' allowlists
+  name it.
+- The container check: clean, 30 tests (18 `jorb`, 6 `jorb-config-disk`,
+  4 `jorb-init`, 2 `jorb-vmm`).

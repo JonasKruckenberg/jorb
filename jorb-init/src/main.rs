@@ -122,7 +122,7 @@ fn environment(env_file: &Path, config_disk: &Path) -> Result<BTreeMap<String, S
 
     let disk =
         fs::read(config_disk).with_context(|| format!("reading {}", config_disk.display()))?;
-    environment.extend(parse_config_disk(&disk)?);
+    environment.extend(jorb_config_disk::parse(&disk)?);
 
     if !environment.contains_key("ORB_TOKEN") {
         bail!("the config disk has no ORB_TOKEN, so bootstrap has nothing to connect with");
@@ -146,20 +146,6 @@ fn parse_env_file(contents: &str) -> BTreeMap<String, String> {
             Some((key.to_owned(), value.to_owned()))
         })
         .collect()
-}
-
-/// The config disk: `KEY=VALUE` lines in the first block, NUL-padded to the
-/// end. Anything after the padding is not ours to read.
-fn parse_config_disk(disk: &[u8]) -> Result<BTreeMap<String, String>> {
-    let end = disk
-        .iter()
-        .take(constants::CONFIG_DISK_BYTES)
-        .position(|byte| *byte == 0)
-        .unwrap_or(disk.len().min(constants::CONFIG_DISK_BYTES));
-
-    let contents = std::str::from_utf8(&disk[..end]).context("the config disk is not UTF-8")?;
-
-    Ok(parse_env_file(contents))
 }
 
 /// Hands over to bootstrap as the image's unprivileged user, in its home.
@@ -252,11 +238,12 @@ mod tests {
         directory
     }
 
-    /// A config disk as jorb writes it: lines, then NUL padding to the block.
-    fn config_disk(contents: &str) -> Vec<u8> {
-        let mut disk = contents.as_bytes().to_vec();
-        disk.resize(constants::CONFIG_DISK_BYTES, 0);
-        disk
+    /// A config disk as jorb writes it.
+    fn config_disk(entries: &[(&str, &str)]) -> Vec<u8> {
+        jorb_config_disk::ConfigDisk::encode(entries)
+            .unwrap()
+            .as_bytes()
+            .to_vec()
     }
 
     #[test]
@@ -287,43 +274,12 @@ mod tests {
     }
 
     #[test]
-    fn the_config_disk_ends_where_its_padding_starts() {
-        let parsed = parse_config_disk(&config_disk(
-            "\nORB_TOKEN=secret\n\nAMP_URL=https://a.test\n",
-        ))
-        .expect("the disk parses");
-
-        assert_eq!(parsed.get("ORB_TOKEN").map(String::as_str), Some("secret"));
-        assert_eq!(
-            parsed.get("AMP_URL").map(String::as_str),
-            Some("https://a.test")
-        );
-        assert_eq!(parsed.len(), 2);
-
-        assert!(
-            parse_config_disk(&config_disk(""))
-                .expect("an empty disk parses")
-                .is_empty()
-        );
-
-        let mut past_the_block = config_disk("ORB_TOKEN=secret\n");
-        past_the_block.extend_from_slice(b"ORB_TOKEN=not-this-one\n");
-        assert_eq!(
-            parse_config_disk(&past_the_block)
-                .expect("the disk parses")
-                .get("ORB_TOKEN")
-                .map(String::as_str),
-            Some("secret")
-        );
-    }
-
-    #[test]
     fn a_config_disk_without_a_token_is_refused() {
         let directory = test_directory("no-token");
         let env_path = directory.join("jorb-env");
         let disk_path = directory.join("no-token.cfg");
         fs::write(&env_path, "PATH=/usr/bin\n").unwrap();
-        fs::write(&disk_path, config_disk("AMP_URL=https://a.test\n")).unwrap();
+        fs::write(&disk_path, config_disk(&[("AMP_URL", "https://a.test")])).unwrap();
 
         let error = environment(&env_path, &disk_path)
             .expect_err("a config disk without a token is refused");
@@ -343,7 +299,7 @@ mod tests {
         .unwrap();
         fs::write(
             &disk_path,
-            config_disk("ORB_TOKEN=from-host\nAMP_URL=https://host.test\n"),
+            config_disk(&[("ORB_TOKEN", "from-host"), ("AMP_URL", "https://host.test")]),
         )
         .unwrap();
 
@@ -370,7 +326,7 @@ mod tests {
     fn a_missing_env_file_is_refused() {
         let directory = test_directory("no-env-file");
         let disk_path = directory.join("with-token.cfg");
-        fs::write(&disk_path, config_disk("ORB_TOKEN=secret\n")).unwrap();
+        fs::write(&disk_path, config_disk(&[("ORB_TOKEN", "secret")])).unwrap();
 
         let error = environment(&directory.join("not-here"), &disk_path)
             .expect_err("a missing env file is refused");

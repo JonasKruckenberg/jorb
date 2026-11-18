@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+jorb-config-disk = { version = "0.1.0", path = "../jorb-config-disk" }
 jorb-vmm = { version = "0.1.0", path = "../jorb-vmm" }
 rustix = { version = "1.1.6", features = ["fs", "process"] }
 secrecy = "0.10.3"

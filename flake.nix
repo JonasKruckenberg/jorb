@@ -45,6 +45,7 @@
           ./Cargo.lock
           ./clippy.toml
           ./jorb
+          ./jorb-config-disk
           ./jorb-init
           ./jorb-vmm
         ];

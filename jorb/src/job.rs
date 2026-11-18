@@ -9,6 +9,7 @@
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail, ensure};
+use jorb_config_disk::ConfigDisk;
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::{Environment, constants, required};
@@ -34,7 +35,7 @@ impl Job {
                 let token = environment("ORB_TOKEN")?
                     .map(SecretString::from)
                     .context("spawn needs ORB_TOKEN, and this job has none")?;
-                let config_disk = ConfigDisk::new(&token, environment("AMP_URL")?.as_deref())?;
+                let config_disk = config_disk(&token, environment("AMP_URL")?.as_deref())?;
                 Ok(Self::Spawn { orb, config_disk })
             }
             "pause" => Ok(Self::Pause { orb }),
@@ -106,63 +107,22 @@ impl std::fmt::Display for OrbId {
     }
 }
 
-/// The config disk: the only thing the host tells one particular orb.
-///
-/// It holds the block the guest will read rather than the values it was built
-/// from, so there is one representation of a config rather than two, and
-/// "already running with this config" is a byte comparison against the file on
-/// the host.
-pub struct ConfigDisk(Vec<u8>);
+/// The config disk for a spawn: the token, and the Amp endpoint when the
+/// provider was given one. The token is refused when empty, because the orb
+/// would have nothing to connect with.
+pub fn config_disk(token: &SecretString, amp_url: Option<&str>) -> Result<ConfigDisk> {
+    let token = token.expose_secret();
+    ensure!(
+        !token.is_empty(),
+        "ORB_TOKEN is empty, so the orb would have nothing to connect with"
+    );
 
-impl ConfigDisk {
-    /// `KEY=VALUE` lines, NUL-padded to the disk's fixed size.
-    ///
-    /// A value carrying a newline or a NUL is refused: the first would make
-    /// one value look like two, the second would end the disk where the
-    /// padding starts. The offending value never reaches the message, because
-    /// one of the two is the token.
-    pub fn new(token: &SecretString, amp_url: Option<&str>) -> Result<Self> {
-        ensure!(
-            !token.expose_secret().is_empty(),
-            "ORB_TOKEN is empty, so the orb would have nothing to connect with"
-        );
-
-        let mut contents = String::new();
-        for (key, value) in [
-            ("ORB_TOKEN", Some(token.expose_secret())),
-            ("AMP_URL", amp_url),
-        ] {
-            let Some(value) = value else { continue };
-            ensure!(
-                !value.contains(['\n', '\0']),
-                "the value of {key} contains a newline or a NUL, which a config disk cannot carry"
-            );
-            contents.push_str(&format!("{key}={value}\n"));
-        }
-
-        ensure!(
-            contents.len() <= constants::CONFIG_DISK_BYTES,
-            "the config disk needs {} bytes, which is more than the {} it has",
-            contents.len(),
-            constants::CONFIG_DISK_BYTES
-        );
-
-        let mut disk = contents.into_bytes();
-        disk.resize(constants::CONFIG_DISK_BYTES, 0);
-
-        Ok(Self(disk))
+    let mut entries = vec![("ORB_TOKEN", token)];
+    if let Some(amp_url) = amp_url {
+        entries.push(("AMP_URL", amp_url));
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for ConfigDisk {
-    /// Never the contents: one of the values on the disk is the token.
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "ConfigDisk({} bytes)", self.0.len())
-    }
+    Ok(ConfigDisk::encode(&entries)?)
 }
 
 #[cfg(test)]
@@ -180,8 +140,8 @@ mod tests {
             .to_string()
     }
 
-    fn config_disk(token: &str, amp_url: Option<&str>) -> Result<ConfigDisk> {
-        ConfigDisk::new(&token.into(), amp_url)
+    fn encoded(token: &str, amp_url: Option<&str>) -> Result<ConfigDisk> {
+        config_disk(&token.into(), amp_url)
     }
 
     #[test]
@@ -281,18 +241,9 @@ mod tests {
     }
 
     #[test]
-    fn a_config_disk_is_its_lines_padded_to_a_fixed_size() {
-        let disk = config_disk("a-token", None).expect("the config disk is representable");
-
-        assert_eq!(disk.as_bytes().len(), constants::CONFIG_DISK_BYTES);
-        assert_eq!(&disk.as_bytes()[..18], b"ORB_TOKEN=a-token\n");
-        assert!(disk.as_bytes()[18..].iter().all(|byte| *byte == 0));
-    }
-
-    #[test]
     fn the_amp_url_is_only_there_when_it_was_given() {
-        let without = config_disk("a-token", None).unwrap();
-        let with = config_disk("a-token", Some("https://amp.example")).unwrap();
+        let without = encoded("a-token", None).unwrap();
+        let with = encoded("a-token", Some("https://amp.example")).unwrap();
 
         assert!(!String::from_utf8_lossy(without.as_bytes()).contains("AMP_URL"));
         assert!(String::from_utf8_lossy(with.as_bytes()).contains("AMP_URL=https://amp.example\n"));
@@ -301,7 +252,7 @@ mod tests {
     #[test]
     fn a_value_the_disk_could_not_carry_back_out_is_refused() {
         for token in ["two\nlines", "a\0b", "trailing\n"] {
-            let refusal = config_disk(token, None)
+            let refusal = encoded(token, None)
                 .expect_err("this token is not representable")
                 .to_string();
 
@@ -309,31 +260,10 @@ mod tests {
             assert!(!refusal.contains(token), "the token leaked: {refusal}");
         }
 
-        let refusal = config_disk("a-token", Some("https://a\nb"))
+        let refusal = encoded("a-token", Some("https://a\nb"))
             .expect_err("this url is not representable")
             .to_string();
 
         assert!(refusal.contains("AMP_URL"), "{refusal}");
-    }
-
-    #[test]
-    fn a_config_that_does_not_fit_is_refused() {
-        let refusal = config_disk(&"a".repeat(constants::CONFIG_DISK_BYTES), None)
-            .expect_err("a config that does not fit is refused")
-            .to_string();
-
-        assert!(refusal.contains("more than the 4096 it has"), "{refusal}");
-    }
-
-    #[test]
-    fn the_token_does_not_appear_in_a_config_disks_debug_output() {
-        let disk = config_disk("a-token-that-must-not-leak", None).unwrap();
-
-        let printed = format!("{disk:?}");
-
-        assert!(
-            !printed.contains("a-token-that-must-not-leak"),
-            "the token leaked into Debug: {printed}"
-        );
     }
 }

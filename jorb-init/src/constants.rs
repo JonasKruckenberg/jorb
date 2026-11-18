@@ -3,11 +3,6 @@
 
 use std::ffi::CStr;
 
-/// The config disk's size. One block holds the handful of keys the host sends,
-/// and a fixed size means the guest reads the same thing whatever the disk's
-/// real length is.
-pub const CONFIG_DISK_BYTES: usize = 4096;
-
 /// Where the config disk arrives: the second disk in attach order,
 /// read-only.
 //

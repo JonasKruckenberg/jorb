@@ -19,11 +19,6 @@ pub const MAX_SLOTS: u16 = 256;
 pub const DEFAULT_VCPUS: std::num::NonZeroU8 = std::num::NonZeroU8::new(4).unwrap();
 pub const DEFAULT_MEMORY_MIB: std::num::NonZeroU32 = std::num::NonZeroU32::new(6144).unwrap();
 
-/// The config disk's size, which both ends agree on: jorb pads to it and
-/// jorb-init reads it. One block holds the two keys v1 has many times over,
-/// and a fixed size makes "identical config" a byte comparison.
-pub const CONFIG_DISK_BYTES: usize = 4096;
-
 /// Where the base image and the orbs' disks live. XFS, so that each disk is a
 /// reflink clone rather than a copy.
 pub const STATE_DIR: &str = "/var/lib/jorb";

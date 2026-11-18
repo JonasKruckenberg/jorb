@@ -382,6 +382,7 @@ name = "jorb"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "jorb-config-disk",
  "jorb-vmm",
  "rustix",
  "secrecy",
@@ -391,10 +392,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "jorb-config-disk"
+version = "0.1.0"
+
+[[package]]
 name = "jorb-init"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "jorb-config-disk",
  "rustix",
  "tracing",
  "tracing-subscriber",

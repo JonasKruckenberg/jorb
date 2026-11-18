@@ -24,7 +24,9 @@ use tokio::time::{sleep, timeout};
 use tracing::{Level, debug, error, info, info_span, instrument};
 
 use crate::host::HostConfig;
-use crate::job::{ConfigDisk, Job};
+use jorb_config_disk::ConfigDisk;
+
+use crate::job::Job;
 use crate::orb::Orb;
 
 /// What one run of jorb was given.

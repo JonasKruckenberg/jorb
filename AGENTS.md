@@ -109,8 +109,9 @@ Units are `jorb-orb-<id>.service` inside `jorb.slice`, started with `systemd-run
 | Crate | Role | Runtime dependencies (allowlist) |
 |---|---|---|
 | `jorb-vmm` (lib) | Generated Cloud Hypervisor client behind `VmBuilder` and `state`. Knows nothing about systemd, slots or Amp | `progenitor-client`, `reqwest` (no default features, `json`), `serde`, `serde_json`, `thiserror`; dev: `tokio`; build: `progenitor` |
-| `jorb` (bin) | Dispatch: env to job, lock, primitives, operations | `jorb-vmm`, `tokio` (current-thread), `tracing`, `tracing-subscriber` (json), `anyhow`, `rustix`, `secrecy` |
-| `jorb-init` (bin, static musl) | Guest PID 1. Synchronous | `rustix`, `tracing`, `tracing-subscriber` (json), `anyhow` |
+| `jorb-config-disk` (lib) | The config disk's size, encoder and parser, shared by both binaries so they cannot disagree | none |
+| `jorb` (bin) | Dispatch: env to job, lock, primitives, operations | `jorb-vmm`, `jorb-config-disk`, `tokio` (current-thread), `tracing`, `tracing-subscriber` (json), `anyhow`, `rustix`, `secrecy` |
+| `jorb-init` (bin, static musl) | Guest PID 1. Synchronous | `jorb-config-disk`, `rustix`, `tracing`, `tracing-subscriber` (json), `anyhow` |
 
 `jorb-vmm` is the only code that knows Cloud Hypervisor. Its `build.rs` reads the OpenAPI spec from `$CH_OPENAPI_SPEC`, which the flake points at the spec inside the source of the exact Cloud Hypervisor package it installs, so client and binary cannot drift. The generated module stays private.
 
