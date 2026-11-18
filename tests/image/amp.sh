@@ -90,6 +90,16 @@ unreachable private-10 10.0.0.1
 unreachable private-172 172.16.0.1
 unreachable private-192 192.168.0.1
 
+# TCP as well as ICMP, to a port the matrix has a listener on, on every host
+# address. Connecting at all means a packet reached the host.
+if [ -n "${JORB_PROBE_HOST_TCP_PORT:-}" ]; then
+	if nc -w 2 "$host_address" "$JORB_PROBE_HOST_TCP_PORT" </dev/null >/dev/null 2>&1; then
+		echo "JORB-GATE amp reach tap-tcp $host_address:$JORB_PROBE_HOST_TCP_PORT REACHED"
+	else
+		echo "JORB-GATE amp reach tap-tcp $host_address:$JORB_PROBE_HOST_TCP_PORT unreachable"
+	fi
+fi
+
 # The one thing an orb does need: Amp itself, over the internet, by name, so
 # this covers DNS as well as routing.
 if wget -q -T 20 -O /dev/null https://ampcode.com/ 2>/dev/null; then

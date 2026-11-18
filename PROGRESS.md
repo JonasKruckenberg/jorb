@@ -1383,3 +1383,28 @@ reaches the host and the LAN.
   `systemctl restart nftables.service`, then require a non-zero exit, the
   table named in the log, and no unit. `[host]` awaiting a run.
 - The container check: clean. shellcheck and nixfmt clean.
+
+### N2. Two missing rules
+
+Confirmed: the forward chain had no source check on packets from a tap and
+nothing on packets toward a tap.
+
+- `iifname "jorb*" ip saddr != 10.77.0.0/16 drop` and
+  `oifname "jorb*" ct state != { established, related } drop`, both in the
+  forward chain. Host-originated traffic to an orb (the output hook) is not
+  restricted; nothing on the host talks to orbs, and the review named only
+  packets "to jorb*" through the forwarder.
+- Found while checking this: the flake's module check ran `nft --check` over
+  `networking.nftables.ruleset`, which is empty for this module, because
+  NixOS keeps tables in `networking.nftables.tables` and the `ruleset` option
+  holds only free-form rules. The check had been passing on an empty file
+  since T9. It now renders the table itself and greps for one of its rules
+  before checking it. PROGRESS.md's T9 entry claimed the generated ruleset
+  passed `nft -c`; that was never true.
+- `nft --check` over the rendered table, in an Alpine container with
+  `CAP_NET_ADMIN`: passes. The same file with one `drop` misspelt fails with
+  exit 1 and a caret under the word, so the check is not vacuous.
+- Matrix section 4 now runs a listener on every host address
+  (`systemd-socket-activate --listen=0.0.0.0:47123 --accept cat`) and the
+  stand-in tries a TCP connection to its tap's host address; connecting is
+  `REACHED`. shellcheck clean. `[host]` awaiting a run.

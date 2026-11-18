@@ -252,6 +252,15 @@
                 ];
               };
 
+              # The module's table as nft reads it. `networking.nftables.ruleset`
+              # holds only free-form rules, not the tables, so checking it
+              # checked nothing.
+              policy =
+                let
+                  table = host.config.networking.nftables.tables.jorb;
+                in
+                "table ${table.family} ${table.name} {\n${table.content}\n}\n";
+
               # The parts of the configuration this check is about, forced by
               # being written down.
               evaluated = pkgs.writeTextDir "evidence" ''
@@ -278,7 +287,8 @@
                 ];
               }
               ''
-                cp ${pkgs.writeText "jorb.nft" host.config.networking.nftables.ruleset} ruleset.nft
+                cp ${pkgs.writeText "jorb.nft" policy} ruleset.nft
+                grep -q 'iifname "jorb\*" drop' ruleset.nft
                 unshare --map-root-user --net nft --check --file ruleset.nft
 
                 # The dashboard has to be JSON Grafana will take, and every

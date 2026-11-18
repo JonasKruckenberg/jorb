@@ -43,6 +43,10 @@ export JORB_RUN_DIR=/run/jorb-matrix
 export JORB_KERNEL
 
 token=matrix-dummy-token
+
+# Section 4 listens on this port on every host address, and the guest tries
+# to connect to it through its tap.
+probe_tcp_port=${JORB_MATRIX_PROBE_TCP_PORT:-47123}
 failures=0
 sections_run=0
 
@@ -108,8 +112,8 @@ write_probe_targets() {
 	host_lan=$(printf '%s' "$default_route" | grep -o 'src [0-9.]*' | cut -d' ' -f2)
 	neighbour=$(printf '%s' "$default_route" | grep -o 'via [0-9.]*' | cut -d' ' -f2)
 
-	printf 'JORB_PROBE_HOST_LAN=%s\nJORB_PROBE_LAN_NEIGHBOUR=%s\n' \
-		"$host_lan" "$neighbour" >"$work/probe-targets"
+	printf 'JORB_PROBE_HOST_LAN=%s\nJORB_PROBE_LAN_NEIGHBOUR=%s\nJORB_PROBE_HOST_TCP_PORT=%s\n' \
+		"$host_lan" "$neighbour" "$probe_tcp_port" >"$work/probe-targets"
 
 	debugfs -w -R "rm /etc/jorb-probe-targets" "$base" >/dev/null 2>&1 || true
 	debugfs -w -R "write $work/probe-targets /etc/jorb-probe-targets" "$base" >/dev/null 2>&1
@@ -486,9 +490,13 @@ section_4() {
 		return
 	fi
 
-	local orb=m4
+	local orb=m4 listener
+	systemd-socket-activate --listen="0.0.0.0:$probe_tcp_port" --accept cat >/dev/null 2>&1 &
+	listener=$!
+
 	job spawn "$orb" "$token" || note "the spawn failed"
 	wait_until_ready "$orb" || true
+	kill "$listener" 2>/dev/null || true
 
 	local probes
 	probes=$(guest_log "$orb" | grep 'JORB-GATE amp reach' || true)

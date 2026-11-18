@@ -476,7 +476,14 @@ in
             # not a route this host offers.
             iifname "jorb*" meta nfproto ipv6 drop
 
+            # A guest may only send from the slots' addresses, so a spoofed
+            # source cannot be masqueraded into someone else's traffic.
+            iifname "jorb*" ip saddr != 10.77.0.0/16 drop
+
             iifname "jorb*" ip daddr @not-the-internet drop
+
+            # Nothing reaches an orb that the orb did not ask for.
+            oifname "jorb*" ct state != { established, related } drop
           }
 
           chain postrouting {
