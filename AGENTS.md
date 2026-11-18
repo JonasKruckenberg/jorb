@@ -74,6 +74,8 @@ Changing anything in this section is a design change. Propose it first.
 | `/run/jorb/<id>.cfg` | config disk, mode 0600 |
 | `/run/jorb/<id>.sock` | Cloud Hypervisor API socket |
 
+The Nix module creates the state directory, `disks/` and the run directory (mode 0700) and builds the base image; `jorb` creates neither.
+
 Units are `jorb-orb-<id>.service` inside `jorb.slice`, started with `systemd-run --collect`. The `jorb-orb-` prefix is the whole reason recover is safe: no other unit on the host, the provider's own `jorb-provider.service` and the gates' `jorb-gate-*` included, can be read as an orb's.
 
 **Slots.** Slot `S` ranges over `0..JORB_SLOTS`, at most 256. Tap `jorb<S>`, host address `10.77.S.1/30`, guest address `10.77.S.2`. A slot is free when `/sys/class/net/jorb<S>` is absent. No free slot is the capacity error; there is no other counter.
@@ -102,7 +104,7 @@ Units are `jorb-orb-<id>.service` inside `jorb.slice`, started with `systemd-run
 
 `jorb-init` knows nothing about Amp's job protocol; `jorb` knows nothing about guest internals. The config disk is the whole interface between them.
 
-**Network policy.** Orbs are internet-only. No guest-initiated packet may reach the host or any private, link-local, CGNAT, loopback or multicast range, and IPv6 from orbs is dropped. Policy lives in one nftables table in the Nix module, matching `iifname "jorb*"`; Rust owns only the slot-to-address function.
+**Network policy.** Orbs are internet-only. No guest-initiated packet may reach the host or any private, link-local, CGNAT, loopback or multicast range, and IPv6 from orbs is dropped. A packet from a tap must come from `10.77.0.0/16`, and nothing reaches a tap unless it belongs to a connection the orb opened. Policy lives in one nftables table, `inet jorb`, in the Nix module, matching `iifname "jorb*"` and `oifname "jorb*"`. Rust owns the slot-to-address function and one check: `start` refuses to start an orb unless that table is loaded, because the policy only drops and so fails open without it.
 
 ## Crates
 
@@ -110,7 +112,7 @@ Units are `jorb-orb-<id>.service` inside `jorb.slice`, started with `systemd-run
 |---|---|---|
 | `jorb-vmm` (lib) | Generated Cloud Hypervisor client behind `VmShape`, `boot(socket, shape)` and `state(socket)`. Knows nothing about systemd, slots or Amp | `progenitor-client`, `reqwest` (no default features, `json`), `serde`, `serde_json`, `thiserror`; dev: `tokio`; build: `progenitor` |
 | `jorb-config-disk` (lib) | The config disk's size, encoder and parser, shared by both binaries so they cannot disagree | none |
-| `jorb` (bin) | Dispatch: env to job, lock, primitives, operations | `jorb-vmm`, `jorb-config-disk`, `tokio` (current-thread), `tracing`, `tracing-subscriber` (json), `anyhow`, `rustix`, `secrecy` |
+| `jorb` (bin) | One job: parse the environment, lock, recover, run the operation, report | `jorb-vmm`, `jorb-config-disk`, `tokio` (current-thread), `tracing`, `tracing-subscriber` (json), `anyhow`, `rustix`, `secrecy` |
 | `jorb-init` (bin, static musl) | Guest PID 1. Synchronous | `jorb-config-disk`, `rustix`, `tracing`, `tracing-subscriber` (json), `anyhow` |
 
 `jorb-vmm` is the only code that knows Cloud Hypervisor. Its `build.rs` reads the OpenAPI spec from `$CH_OPENAPI_SPEC`, which the flake points at the spec inside the source of the exact Cloud Hypervisor package it installs, so client and binary cannot drift. The generated module stays private.
@@ -127,7 +129,7 @@ Units are `jorb-orb-<id>.service` inside `jorb.slice`, started with `systemd-run
 The code is literate in structure, not in comment volume: it is arranged to be read top to bottom as an explanation.
 
 - Every crate root and module opens with a short `//!` paragraph: what the module is for, what it refuses to know about, and any reasoning the code cannot show. Design prose lives there and nowhere else.
-- Order code top-down: the public entry point first, then the functions it calls, in call order. `main` reads as the job's story: parse, lock, observe, converge, report.
+- Order code top-down: the public entry point first, then the functions it calls, in call order. `main` reads as the job's story: parse, lock, recover, run the operation, report.
 - A reader should understand a module from its `//!` paragraph and its function names without opening the bodies.
 
 ### Names
@@ -170,11 +172,11 @@ The code is literate in structure, not in comment volume: it is arranged to be r
 ### Tests and size
 
 - Unit-test every pure function. Tests must not need root, KVM or network; those checks are scripts under `tests/host/`.
-- Size guidance, to detect over-building rather than as targets: about 150 hand-written lines in `jorb-vmm`, 300 in `jorb`, 150 in `jorb-init`.
+- Size guidance, to detect over-building rather than as targets: about 150 hand-written lines in `jorb-vmm`, 300 in `jorb`, 150 in `jorb-init`, 100 in `jorb-config-disk`.
 
 ## Security
 
-The provider is a closed-source, self-updating CLI. It runs as an unprivileged user and invokes `jorb` through one sudo rule that preserves only `ORB_OPERATION`, `ORB_ID`, `ORB_TOKEN` and `AMP_URL`. `JORB_*` settings are set by the Nix wrapper on the root side and never taken from the caller. Input validation in `jorb` is therefore the privilege boundary.
+The provider is a closed-source, self-updating CLI. It runs as an unprivileged user and invokes `jorb` through one sudo rule that preserves only `ORB_OPERATION`, `ORB_ID`, `ORB_TOKEN` and `AMP_URL`. The rule runs as root only and has no `SETENV`, which would let the caller pass any variable. The root-side wrapper unsets every variable but those four, then sets `PATH` and every `JORB_*` setting itself, the VMM as an absolute store path, so nothing about the host is taken from the caller. jorb's own subprocesses never see `ORB_TOKEN`. Input validation in `jorb` is therefore the privilege boundary.
 
 ## Commands
 

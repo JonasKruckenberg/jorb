@@ -1502,3 +1502,19 @@ that wrote the paragraphs claiming otherwise.
 Confirmed: AGENTS.md line 3 said 8 GiB; G1 recorded 15673 MiB total. Line 3
 now says "16 GiB RAM (15673 MiB reported)". Revisiting slots and memory per
 orb for the real figure is the owner's, and is open question 1.
+
+### D3. AGENTS.md in line with phases 1 to 5
+
+Each change to a fixed interface or the allowlist was made in the commit
+that changed the code: the Contract (S1), the allowlist (R3, R6), the Crates
+table (R6, R7), the Bounds rule (R5, B3), the Failure model (B1) and the
+`jorb-init` steps (B3, B4). This commit brings the rest along:
+
+- Reading order: `main` is "parse, lock, recover, run the operation,
+  report".
+- Fixed interfaces: the module, not jorb, creates the directories and the
+  base image. The Network policy names the table, the two N2 rules and N1's
+  check.
+- Crates: `jorb`'s role, and size guidance for `jorb-config-disk`.
+- Security: no `SETENV`, root only, the wrapper's cleaned environment, and
+  the token kept out of subprocesses.
