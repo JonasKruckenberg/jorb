@@ -1215,8 +1215,7 @@ Confirmed for each item.
   `state_directory` and `run_directory`.
 - invocation, request, job, command: the input is a `Job` in `job.rs` (R2);
   `Invocation` and `run_command` are gone (S1, R1). `git grep -n -i
-  'invocation\|request' -- 'jorb/src'` finds only HTTP requests in `jorb-vmm`
-  wording, none in `jorb`.
+  'invocation\|request' -- 'jorb/src'` finds nothing.
 - Test scripts: `g4-boot.sh` is `boot-under-systemd.sh`,
   `g5-free-page-reporting.sh` is `free-page-reporting.sh`, `g6-amp-image.sh`
   is `amp-image.sh`, `g7-observability.sh` is `observability.sh`,
