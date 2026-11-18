@@ -974,10 +974,10 @@ Confirmed at every place the review named, plus two more in `tests/host`
 (`lib.sh`'s console lookup and `g6-amp-image.sh`'s image choice). Removed all
 of them; the kernel derivation now builds `arch/arm64/boot/Image` only.
 
-- `git grep -i x86 -- ':!*.lock'`: nothing. Read literally, `grep -ri x86 .`
-  also searches `target/` and `.git`, which hold build products and history,
-  so the tracked-files form is the check that means something. This section
-  of PROGRESS.md avoids the word for the same reason.
+- `git grep -i x86 -- ':!*.lock'`: only this section of PROGRESS.md, which
+  has to name what it removed. Read literally, `grep -ri x86 .` also searches
+  `target/` and `.git`, which hold build products and history, so the
+  tracked-files form is the check that means something.
 - `nix eval` of `packages.aarch64-linux.{guest-kernel,jorb-prepare-image}.drvPath`:
   both evaluate. Building them needs the host.
 - `nixfmt --check flake.nix nix/*.nix` and `shellcheck -x` over every script:
