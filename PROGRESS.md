@@ -523,9 +523,10 @@ change, so it waits on the owner.
 
 ## Open questions
 
-1. `AGENTS.md` describes the host as having 8 GiB of memory; this machine
-   reports 15673 MiB. The G1 figure above is from the machine, not the
-   document.
+1. `[owner]` AGENTS.md now says 16 GiB (D2). v1's sizing (1 slot, 4 vCPUs,
+   6 GiB per orb, `MemoryHigh` 11797M) was chosen against the 8 GiB the
+   document used to state; whether that is still the right split for
+   15673 MiB is the owner's call.
 2. G1 was read with no observability stack running and no zram configured, so
    it is an upper bound rather than the steady state the plan asks about.
    Worth re-reading once T9 and T10 are actually on the host.
@@ -1495,3 +1496,9 @@ that wrote the paragraphs claiming otherwise.
   milestone review, which in that session was a self-review.
 - Both paragraphs now carry a correction note in place, and the code
   matches what they describe (S3, R7).
+
+### D2. The host's memory
+
+Confirmed: AGENTS.md line 3 said 8 GiB; G1 recorded 15673 MiB total. Line 3
+now says "16 GiB RAM (15673 MiB reported)". Revisiting slots and memory per
+orb for the real figure is the owner's, and is open question 1.

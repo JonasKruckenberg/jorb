@@ -1,6 +1,6 @@
 # jorb
 
-Self-hosted Amp orb provider. `amp orb provider` runs the `jorb` binary once per job; `jorb` turns that job into a Cloud Hypervisor microVM on one host: a Mac mini M2, 8 GiB RAM, aarch64 Asahi NixOS, 16K host pages.
+Self-hosted Amp orb provider. `amp orb provider` runs the `jorb` binary once per job; `jorb` turns that job into a Cloud Hypervisor microVM on one host: a Mac mini M2, 16 GiB RAM (15673 MiB reported), aarch64 Asahi NixOS, 16K host pages.
 
 Before any work, read `PLAN.md` (tasks) and `PROGRESS.md` (current state, gate results, open questions).
 
