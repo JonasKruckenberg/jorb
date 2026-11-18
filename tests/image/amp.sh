@@ -29,6 +29,33 @@ echo "JORB-GATE amp dirty $(cat /proc/sys/vm/dirty_expire_centisecs 2>/dev/null)
 # Step 1: the mounts, as a list of what is mounted where.
 echo "JORB-GATE amp mounts $(awk '{print $2}' /proc/mounts | tr '\n' ' ')"
 
+# Step 1 again: what a shell expects of /dev.
+if echo probe >/dev/stderr 2>/dev/null; then
+	echo "JORB-GATE amp dev-stderr works"
+else
+	echo "JORB-GATE amp dev-stderr FAILED"
+fi
+if [ -e /dev/fd/0 ]; then
+	echo "JORB-GATE amp dev-fd works"
+else
+	echo "JORB-GATE amp dev-fd FAILED"
+fi
+# script opens /dev/ptmx and then the slave by its /dev/pts path.
+if ! command -v script >/dev/null 2>&1; then
+	echo "JORB-GATE amp pty UNTESTED: this busybox has no script applet"
+elif script -q -c true /dev/null >/dev/null 2>&1; then
+	echo "JORB-GATE amp pty works"
+else
+	echo "JORB-GATE amp pty FAILED"
+fi
+
+# Step 3: the hostname resolves from /etc/hosts, without DNS.
+if ping -c 1 -W 2 "$(hostname)" >/dev/null 2>&1; then
+	echo "JORB-GATE amp hostname works"
+else
+	echo "JORB-GATE amp hostname FAILED"
+fi
+
 # The guest's own address tells it the host's: a slot is a /30, and the host
 # is the other usable address in it.
 guest_address=$(ip -o -4 addr show eth0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)

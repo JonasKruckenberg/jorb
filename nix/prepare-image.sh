@@ -52,14 +52,6 @@ skopeo inspect --config "oci:$work/oci:amp" |
 	jq -r '.config.Env // [] | .[]' >"$rootfs/etc/jorb-env"
 echo "wrote $(grep -c '' "$rootfs/etc/jorb-env") variables to /etc/jorb-env"
 
-# The guest's hostname is its orb id, set from the ip= cmdline, and it has to
-# resolve: tools that look themselves up should not wait for DNS that cannot
-# answer. 127.0.0.2 keeps it off the loopback name.
-cat >"$rootfs/etc/hosts" <<'HOSTS'
-127.0.0.1	localhost
-::1		localhost ip6-localhost ip6-loopback
-HOSTS
-
 # A sparse file: the ext4 inside it is 64 GiB, the bytes on disk are what the
 # image actually uses, and every orb's disk is a reflink clone of it.
 truncate -s "$base_size" "$work/base.raw"

@@ -80,4 +80,12 @@ for mountpoint in /proc /sys /dev/pts /dev/shm /run; do
 	fi
 done
 
+for probe in dev-stderr dev-fd pty hostname; do
+	result=$(marker "amp $probe")
+	evidence "$probe: $result"
+	if [ "$result" != works ]; then
+		fail "$probe does not work in the guest"
+	fi
+done
+
 pass "jorb-init mounted, set the writeback window, wrote resolv.conf, passed the token and ran bootstrap as 1000:1000 in /home/user"

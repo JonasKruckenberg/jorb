@@ -7,6 +7,11 @@ use std::ffi::CStr;
 /// read-only.
 pub const CONFIG_DISK_DEVICE: &str = "/dev/vdb";
 
+/// Where the kernel keeps the hostname `ip=` set, and the file that makes it
+/// resolve.
+pub const HOSTNAME: &str = "/proc/sys/kernel/hostname";
+pub const HOSTS: &str = "/etc/hosts";
+
 /// The image's own environment, written into the base image by
 /// jorb-prepare-image from the container config's `Env`.
 pub const ENV_FILE: &str = "/etc/jorb-env";

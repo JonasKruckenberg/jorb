@@ -1320,3 +1320,24 @@ cmdline the kernel halts and the unit stays active.
   review asked for killing bootstrap; the stand-in exiting by itself tests the
   same `waitpid` path without reaching into the guest. `[host]` awaiting a run.
 - The container check: clean. shellcheck clean.
+
+### B4. The guest lacked things the Docker reference provides
+
+Confirmed: jorb-init created no `/dev/fd`, `/dev/stdin`, `/dev/stdout` or
+`/dev/stderr`; it mounted `devpts` with `nodev`; and the base image's
+`/etc/hosts` had no line for the hostname, although `prepare-image.sh`'s own
+comment said the hostname must resolve.
+
+- Step 1 mounts `devpts` with `nosuid` only and links the four names into
+  `/proc/self/fd`. Step 3 also writes `/etc/hosts` at boot: `localhost`
+  lines and `127.0.0.2 <hostname>`, the hostname read from
+  `/proc/sys/kernel/hostname`. `prepare-image.sh` no longer writes
+  `/etc/hosts`; jorb-init owns it and overwrites it on every boot.
+- AGENTS.md's steps 1 and 3 say so.
+- A unit test pins the `/etc/hosts` text. The container check: clean, 30
+  tests.
+- Host check: the stand-in bootstrap now reports `dev-stderr`, `dev-fd`, `pty`
+  (busybox `script`, which opens the slave by its `/dev/pts` path; reported
+  as untested if the applet is missing) and `hostname` (a ping by name), and
+  `jorb-init-in-guest.sh` fails unless all four say `works`. `[host]`
+  awaiting a run.

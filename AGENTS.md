@@ -92,9 +92,9 @@ Units are `jorb-orb-<id>.service` inside `jorb.slice`, started with `systemd-run
 
 **`jorb-init` (guest PID 1), in order**
 
-1. Mount `proc`, `sysfs`, `devpts`, tmpfs on `/dev/shm` (1 GiB) and `/run`. The kernel mounts devtmpfs itself.
+1. Mount `proc`, `sysfs`, `devpts` (without `nodev`), tmpfs on `/dev/shm` (1 GiB) and `/run`; link `/dev/fd`, `/dev/stdin`, `/dev/stdout` and `/dev/stderr` into `/proc/self/fd`. The kernel mounts devtmpfs itself.
 2. Write `100` to `vm.dirty_expire_centisecs` and `vm.dirty_writeback_centisecs`. Pause is a power cut; this shrinks the loss window to about a second.
-3. Copy `/proc/net/pnp` to `/etc/resolv.conf`.
+3. Copy `/proc/net/pnp` to `/etc/resolv.conf`, and write `/etc/hosts` with `127.0.0.2 <hostname>` so the orb id resolves.
 4. Build the environment: `/etc/jorb-env`, then `HOME=/home/user`, `USER=user`, then the config disk's keys.
 5. If `ORB_TOKEN` is missing, or any step above failed, log an error and power off. A stopped unit is the truthful state.
 6. Spawn `setpriv --reuid=user --regid=user --init-groups -- /usr/local/bin/amp orb bootstrap` in `/home/user`.

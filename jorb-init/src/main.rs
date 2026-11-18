@@ -44,8 +44,10 @@ fn main() -> ! {
 /// bootstrap itself. Returns its pid: the one child reap reports on.
 fn start_bootstrap() -> Result<u32> {
     mount_filesystems()?;
+    link_standard_streams()?;
     shorten_the_writeback_window()?;
     write_resolv_conf()?;
+    write_hosts()?;
 
     let environment = environment(
         Path::new(constants::ENV_FILE),
@@ -56,30 +58,44 @@ fn start_bootstrap() -> Result<u32> {
 }
 
 /// The kernel mounts devtmpfs itself; these are the rest of what a userspace
-/// expects to find.
+/// expects to find. devpts is the one without `nodev`: its entries are the
+/// pty devices, and a program opening `/dev/pts/N` by path needs them to be.
 fn mount_filesystems() -> Result<()> {
-    for (source, target, filesystem, options) in [
-        ("proc", "/proc", "proc", None),
-        ("sysfs", "/sys", "sysfs", None),
-        ("devpts", "/dev/pts", "devpts", None),
+    let ordinary = MountFlags::NOSUID | MountFlags::NODEV;
+
+    for (source, target, filesystem, flags, options) in [
+        ("proc", "/proc", "proc", ordinary, None),
+        ("sysfs", "/sys", "sysfs", ordinary, None),
+        ("devpts", "/dev/pts", "devpts", MountFlags::NOSUID, None),
         (
             "tmpfs",
             "/dev/shm",
             "tmpfs",
+            ordinary,
             Some(constants::DEV_SHM_OPTIONS),
         ),
-        ("tmpfs", "/run", "tmpfs", None),
+        ("tmpfs", "/run", "tmpfs", ordinary, None),
     ] {
         fs::create_dir_all(target).with_context(|| format!("creating {target}"))?;
 
-        mount(
-            source,
-            target,
-            filesystem,
-            MountFlags::NOSUID | MountFlags::NODEV,
-            options,
-        )
-        .with_context(|| format!("mounting {filesystem} on {target}"))?;
+        mount(source, target, filesystem, flags, options)
+            .with_context(|| format!("mounting {filesystem} on {target}"))?;
+    }
+
+    Ok(())
+}
+
+/// `/dev/fd` and the three standard streams, which devtmpfs does not create
+/// and which `<(...)` and `> /dev/stderr` rely on.
+fn link_standard_streams() -> Result<()> {
+    for (link, target) in [
+        ("/dev/fd", "/proc/self/fd"),
+        ("/dev/stdin", "/proc/self/fd/0"),
+        ("/dev/stdout", "/proc/self/fd/1"),
+        ("/dev/stderr", "/proc/self/fd/2"),
+    ] {
+        std::os::unix::fs::symlink(target, link)
+            .with_context(|| format!("linking {link} to {target}"))?;
     }
 
     Ok(())
@@ -104,6 +120,23 @@ fn shorten_the_writeback_window() -> Result<()> {
 fn write_resolv_conf() -> Result<()> {
     let resolved = fs::read_to_string("/proc/net/pnp").context("reading /proc/net/pnp")?;
     fs::write("/etc/resolv.conf", resolved).context("writing /etc/resolv.conf")
+}
+
+/// The guest's hostname is its orb id, set by the kernel from `ip=`. Writing
+/// it to `/etc/hosts` makes it resolve without DNS, which cannot answer for
+/// it.
+fn write_hosts() -> Result<()> {
+    let hostname = fs::read_to_string(constants::HOSTNAME).context("reading the hostname")?;
+    fs::write(constants::HOSTS, hosts(hostname.trim())).context("writing /etc/hosts")
+}
+
+/// `127.0.0.2` keeps the hostname off the `localhost` line, as Debian does.
+fn hosts(hostname: &str) -> String {
+    format!(
+        "127.0.0.1\tlocalhost\n\
+         ::1\tlocalhost ip6-localhost ip6-loopback\n\
+         127.0.0.2\t{hostname}\n"
+    )
 }
 
 /// The environment bootstrap runs with: the image's own variables, then who
@@ -269,6 +302,14 @@ mod tests {
         );
         assert!(!parsed.contains_key("NOT_AN_ASSIGNMENT"));
         assert_eq!(parsed.len(), 4);
+    }
+
+    #[test]
+    fn the_hostname_resolves_to_its_own_loopback_address() {
+        assert_eq!(
+            hosts("amp-T-1a2b"),
+            "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n127.0.0.2\tamp-T-1a2b\n"
+        );
     }
 
     #[test]
