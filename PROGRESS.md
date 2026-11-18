@@ -1162,3 +1162,46 @@ handle, where AGENTS.md says an API socket is the only name for a VM.
 - The boot example and AGENTS.md's Crates row follow. PLAN.md T4 still shows
   the builder; it is the plan as written and is left as history.
 - The container check: clean, 30 tests.
+
+### R1, R4, R5. Organise jorb by the model
+
+Confirmed: `host.rs` held settings, paths, `Slot` and the subprocess runner;
+`Orb` was two borrows used as a namespace; the operations were split across
+`main.rs` match arms, a free function and `orb.rs` methods; recover was named
+`stop_dead_orbs`; `main.rs` mentioned a `converge` that no longer existed; the
+VM shape was assembled from `orb.rs`, `host.rs`, `systemd.rs` (the VMM flag)
+and `constants.rs`; and `constants.rs` held 51 constants by kind. Done as one
+commit, because the three findings are one move of the same code.
+
+| File | Question |
+|---|---|
+| `main.rs` | Parse, lock, run, report |
+| `job.rs` | What did Amp ask? `Job`, `OrbId`, the spawn's config disk |
+| `settings.rs` | What is this host configured as? `Settings`, the `JORB_*` defaults |
+| `operations.rs` | `recover`, `spawn`, `pause`, `delete`, and `stop`, `ensure_disk`, `remove_disk`, `start` |
+| `unit.rs` | systemd: unit names, list, start, stop; and `run`, the one way jorb runs a program |
+| `disk.rs` | The state- and run-directory layout, and the config disk file |
+| `vm.rs` | `Slot`, the cmdline, the VMM's command line, `state`, `boot` |
+| `limits.rs` | Durations, counts and sizes only |
+
+- `operations.rs` opens with AGENTS.md's operation table, and the four
+  operations below it are that table in code. No type named `Orb`; the
+  function is `recover`.
+- `run` sits in `unit.rs` rather than a module of its own because systemd's
+  tools are all it runs in this phase. N1 adds `nft`, at which point that
+  placement is revisited.
+- The VMM's command line (`cloud-hypervisor --api-socket=…`) moved from the
+  systemd module to `vm::vmm_command`; `unit::start` takes a command and
+  knows nothing about what it is. Changing the cmdline touches
+  `vm.rs` and its golden-string test only. A disk change also touches
+  `jorb-vmm`'s `VmShape` and golden JSON, since R7 made every disk a field.
+- `limits.rs` holds 15 bounds and sizes; no path, program or device. The
+  names moved to the module that uses them (for example `UNIT_PREFIX` and
+  `SYSTEMCTL` in `unit.rs`, `GUEST_NETMASK` and `CONSOLE_DEVICE` in `vm.rs`).
+  AGENTS.md's Bounds rule now says that.
+- Path functions are `…_path` and the settings are `state_directory` and
+  `run_directory` (R8's Rust half).
+- Behaviour is unchanged: the same calls in the same order. The container
+  check: clean, 29 tests. One `jorb` test went: "removing a missing path is
+  not a failure" is now the last line of the config disk test.
+- `jorb` is 1370 lines including tests and comments, against 1270 before.

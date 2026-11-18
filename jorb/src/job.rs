@@ -4,7 +4,7 @@
 //! Every value here arrives as an `ORB_*` environment variable from the
 //! provider, which is closed-source and unprivileged. This module is the
 //! privilege boundary: every refusal jorb makes of Amp's input is in it.
-//! What the host is, as against what Amp wants, lives in `host.rs`.
+//! What the host is, as against what Amp wants, lives in `settings.rs`.
 
 use std::str::FromStr;
 
@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail, ensure};
 use jorb_config_disk::ConfigDisk;
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::{Environment, constants, required};
+use crate::{Environment, limits, required};
 
 /// What Amp asked for: an operation on one orb, with what that operation
 /// needs and nothing else. Only a spawn carries a config disk, so a spawn
@@ -84,9 +84,9 @@ impl FromStr for OrbId {
             "an orb id must start with a letter or a digit, and {first:?} does not"
         );
         ensure!(
-            raw.len() <= constants::MAX_ORB_ID_LEN,
+            raw.len() <= limits::MAX_ORB_ID_LEN,
             "an orb id cannot be longer than {} characters, and this one is {}",
-            constants::MAX_ORB_ID_LEN,
+            limits::MAX_ORB_ID_LEN,
             raw.len()
         );
 
@@ -150,7 +150,7 @@ mod tests {
             "amp-T-1a2b3c4d",
             "a",
             "orb_1",
-            &"a".repeat(constants::MAX_ORB_ID_LEN),
+            &"a".repeat(limits::MAX_ORB_ID_LEN),
         ] {
             assert_eq!(
                 raw.parse::<OrbId>().expect("this id is valid").to_string(),
@@ -166,7 +166,7 @@ mod tests {
         for (raw, reason) in [
             ("", "cannot be empty"),
             (
-                &"a".repeat(constants::MAX_ORB_ID_LEN + 1),
+                &"a".repeat(limits::MAX_ORB_ID_LEN + 1),
                 "longer than 64 characters",
             ),
             ("-rf", "must start with"),
