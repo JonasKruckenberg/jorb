@@ -554,8 +554,9 @@ change, so it waits on the owner.
    reboot syscall ever fails, it exits, the kernel panics, and without
    `panic=` the guest halts with its unit still active and the VM reported
    `Running`, so spawn would leave it alone. `panic=-1` makes the kernel
-   reboot instead, which Cloud Hypervisor turns into a VM exit, which stops
-   the unit. It changes the fixed cmdline, so it waits for the owner.
+   reboot instead of halting. Whether Cloud Hypervisor then exits, which
+   would stop the unit, or resets the VM has not been checked. It changes the
+   fixed cmdline, so it waits for the owner and a host check.
 
 ## Notes per task
 
