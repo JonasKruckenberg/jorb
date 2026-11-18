@@ -1204,4 +1204,4 @@ commit, because the three findings are one move of the same code.
 - Behaviour is unchanged: the same calls in the same order. The container
   check: clean, 29 tests. One `jorb` test went: "removing a missing path is
   not a failure" is now the last line of the config disk test.
-- `jorb` is 1370 lines including tests and comments, against 1270 before.
+- `jorb` is 1370 lines including tests and comments, against 1483 before (`wc -l` over `jorb/src`).
