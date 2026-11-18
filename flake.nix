@@ -174,7 +174,7 @@
         default = jorbFor pkgs;
         jorb = jorbFor pkgs;
         guest-kernel = pkgs.callPackage ./nix/kernel.nix { };
-        test-image = pkgs.callPackage ./nix/test-image.nix { jorb-init = jorbInitFor pkgs; };
+        test-image = pkgs.callPackage ./tests/image/image.nix { jorb-init = jorbInitFor pkgs; };
         jorb-init = jorbInitFor pkgs;
         jorb-prepare-image = pkgs.callPackage ./nix/image.nix { jorb-init = jorbInitFor pkgs; };
         # The VMM the client is generated for, so the module runs that one.

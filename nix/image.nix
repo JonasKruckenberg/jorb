@@ -6,7 +6,7 @@
 # to survive into the ext4, and mkfs.ext4 -d keeps whatever the unpack left.
 #
 # The digests below are what the gate records. Refresh them by running
-# tests/host/g6-amp-image.sh, which prints the current one; the `latest` tags
+# tests/host/amp-image.sh, which prints the current one; the `latest` tags
 # move often, which is the reason jorb pins a digest rather than a tag.
 {
   lib,

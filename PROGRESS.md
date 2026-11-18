@@ -43,9 +43,8 @@ tests/host/boot-check.sh
 read `JORB_*` from the environment, so `sudo -E` rather than plain `sudo`:
 
 ```sh
-sudo -E tests/host/g3-reflink.sh          # writes into root-owned /var/lib/jorb
-sudo -E tests/host/g4-boot.sh             # the tap, the ip= address, the journal
-sudo -E tests/host/g5-free-page-reporting.sh
+sudo -E tests/host/boot-under-systemd.sh             # the tap, the ip= address, the journal
+sudo -E tests/host/free-page-reporting.sh
 ```
 
 **The real base image**, which needs the network and root, and has to exist
@@ -53,7 +52,7 @@ before anything boots an actual orb:
 
 ```sh
 sudo nix run .#jorb-prepare-image
-sudo -E tests/host/t5-jorb-init.sh        # jorb-init in a real guest
+sudo -E tests/host/jorb-init-in-guest.sh        # jorb-init in a real guest
 ```
 
 **The behaviour matrix**, all seven sections or one at a time. Sections 4 and 5 need things this host does not have yet: the module's nftables policy and NAT, and a zram device.
@@ -66,14 +65,14 @@ sudo -E tests/host/matrix.sh 4            # just the network policy, say
 **Once the module and T10 are on the host:**
 
 ```sh
-sudo -E tests/host/g7-observability.sh
+sudo -E tests/host/observability.sh
 ```
 
 **When the pinned Amp digest is bumped**, to re-verify A7 and A8 against the
 new image:
 
 ```sh
-tests/host/g6-amp-image.sh
+tests/host/amp-image.sh
 ```
 
 ## Gate results
@@ -1205,3 +1204,26 @@ commit, because the three findings are one move of the same code.
   check: clean, 29 tests. One `jorb` test went: "removing a missing path is
   not a failure" is now the last line of the config disk test.
 - `jorb` is 1370 lines including tests and comments, against 1483 before (`wc -l` over `jorb/src`).
+
+### R8. Names
+
+Confirmed for each item.
+
+- Path functions: done in R1 (`lock_path`, `disk_path`, `base_image_path`,
+  `config_disk_path`, `partial_disk_path`, `api_socket_path`).
+- `state_dir` beside `state_directory()`: done in R1; `Settings` has
+  `state_directory` and `run_directory`.
+- invocation, request, job, command: the input is a `Job` in `job.rs` (R2);
+  `Invocation` and `run_command` are gone (S1, R1). `git grep -n -i
+  'invocation\|request' -- 'jorb/src'` finds only HTTP requests in `jorb-vmm`
+  wording, none in `jorb`.
+- Test scripts: `g4-boot.sh` is `boot-under-systemd.sh`,
+  `g5-free-page-reporting.sh` is `free-page-reporting.sh`, `g6-amp-image.sh`
+  is `amp-image.sh`, `g7-observability.sh` is `observability.sh`,
+  `t5-jorb-init.sh` is `jorb-init-in-guest.sh`. Each still opens with the gate
+  or task it answers, because the results above are recorded by that ID.
+- `nix/test-image.nix`, `nix/test-init.sh` and `nix/test-amp.sh` are
+  `tests/image/image.nix`, `init.sh` and `amp.sh`. The flake and "What to run
+  next" follow.
+- `shellcheck -x` over every script and `nixfmt --check` over every Nix file:
+  clean. `packages.aarch64-linux.test-image` evaluates.
